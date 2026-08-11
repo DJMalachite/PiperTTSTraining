@@ -113,49 +113,24 @@ DATA_KEYS = (
     "vowel_clusters",
 )
 
-# Upstream's two default ModelCheckpoint callbacks, replicated so that changing
-# save_top_k does not silently drop them: setting trainer.callbacks replaces
-# trainer_defaults wholesale.
-_CHECKPOINT_CLASS = "lightning.pytorch.callbacks.ModelCheckpoint"
+# Upstream's ModelCheckpoints cannot be replaced from a config file.
+# LightningCLI concatenates config callbacks onto trainer_defaults rather than
+# replacing them, so a replica is an addition — and an identical replica is a
+# RuntimeError, because two stateful callbacks of one type may not share a
+# state_key. Anything we want to change about them has to be changed on the
+# live objects; train/callbacks.py does that in `setup`.
+_POLICY_CLASS = "pipertrainer.train.callbacks.CheckpointPolicy"
 
 
-def checkpoint_callbacks(save_top_k: int, *, mos: bool = True) -> list[dict[str, Any]]:
-    """Upstream's checkpoint callbacks, minus the ones that cannot fire.
-
-    ``mos=False`` drops the ``val_mos`` checkpoint. That is not a preference:
-    ``val_mos`` is logged only when the model has a MOS predictor, and
-    ``ModelCheckpoint`` raises ``MisconfigurationException`` at the first
-    epoch end when its monitored key is absent. Keeping both together is what
-    makes ``model.mos_metric: none`` a crash instead of a saving.
-    """
-    callbacks = [
-        {
-            "class_path": _CHECKPOINT_CLASS,
-            "init_args": {
-                "monitor": "val_mel",
-                "mode": "min",
-                "save_top_k": save_top_k,
-                "save_last": True,
-                "filename": "epoch={epoch}-val_mel={val_mel:.4f}",
-                "auto_insert_metric_name": False,
-            },
-        },
-    ]
-    if mos:
-        callbacks.append(
-            {
-                "class_path": _CHECKPOINT_CLASS,
-                "init_args": {
-                    "monitor": "val_mos",
-                    "mode": "max",
-                    "save_top_k": save_top_k,
-                    "save_last": False,
-                    "filename": "epoch={epoch}-val_mos={val_mos:.4f}",
-                    "auto_insert_metric_name": False,
-                },
-            }
-        )
-    return callbacks
+def checkpoint_policy(
+    save_top_k: int | None = None, *, disable_monitors: Sequence[str] = ()
+) -> dict[str, Any]:
+    init: dict[str, Any] = {}
+    if save_top_k is not None:
+        init["save_top_k"] = int(save_top_k)
+    if disable_monitors:
+        init["disable_monitors"] = list(disable_monitors)
+    return {"class_path": _POLICY_CLASS, "init_args": init}
 
 
 DEFAULT_SAVE_TOP_K = 5
@@ -584,25 +559,30 @@ def build(
     if int(prof.trainer.accumulate_grad_batches) > 1:
         trainer["accumulate_grad_batches"] = int(prof.trainer.accumulate_grad_batches)
         warnings.append(NOOP_WARNINGS["trainer.accumulate_grad_batches"])
-    # Upstream monitors val_mos unconditionally, but only logs it when a MOS
-    # predictor exists. With mos_metric 'none' the run dies at the end of the
-    # first epoch, so the callbacks must be replaced even at the default
-    # save_top_k — this is a crash fix, not a preference.
+    # Upstream monitors val_mos unconditionally but logs it only when a MOS
+    # predictor loaded. Offline — or with mos_metric 'none' — it never appears
+    # and ModelCheckpoint raises at the end of the first epoch, after real
+    # training work. Neither that nor save_top_k can be fixed by naming
+    # callbacks in the config; see checkpoint_policy above.
     mos_enabled = model["mos_metric"] not in ("none", "")
     save_top_k = int(prof.trainer.checkpoint_save_top_k)
-    if save_top_k != DEFAULT_SAVE_TOP_K or not mos_enabled:
-        trainer["callbacks"] = checkpoint_callbacks(save_top_k, mos=mos_enabled)
-    if save_top_k != DEFAULT_SAVE_TOP_K:
+    disable = [] if mos_enabled else ["val_mos"]
+    retune = None if save_top_k == DEFAULT_SAVE_TOP_K else save_top_k
+    if disable or retune is not None:
+        trainer["callbacks"] = [
+            checkpoint_policy(retune, disable_monitors=disable)
+        ]
+    if retune is not None:
         notes.append(
             f"keeping {save_top_k} checkpoints per metric instead of "
             f"upstream's {DEFAULT_SAVE_TOP_K}"
         )
     if not mos_enabled:
         notes.append(
-            "model.mos_metric is 'none', so the val_mos checkpoint callback is "
-            "dropped. Upstream's default monitors a metric that is never "
-            "logged in that case and Lightning raises at the first epoch end. "
-            "Checkpoints are selected by val_mel."
+            "val_mos is never logged in this configuration, so its checkpoint "
+            "callback is switched off (save_top_k=0). Left alone it raises "
+            "MisconfigurationException at the end of the first epoch. "
+            "Checkpoints are selected by val_mel, which still writes last.ckpt."
         )
 
     if prof.trainer.precision != "32-true":

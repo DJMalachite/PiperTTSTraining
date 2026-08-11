@@ -525,74 +525,81 @@ class OfflineTest(unittest.TestCase):
 
 
 class CheckpointCallbackTest(unittest.TestCase):
-    def test_changing_save_top_k_replicates_both_upstream_callbacks(self):
-        plan = argmap.build(make_profile(trainer__checkpoint_save_top_k=2))
-        callbacks = plan.trainer["callbacks"]
-        self.assertEqual(len(callbacks), 2)
-        monitors = [cb["init_args"]["monitor"] for cb in callbacks]
-        self.assertEqual(monitors, ["val_mel", "val_mos"])
-        self.assertEqual(
-            [cb["init_args"]["save_top_k"] for cb in callbacks], [2, 2]
-        )
-        # Only the val_mel callback writes last.ckpt, matching upstream.
-        self.assertEqual(
-            [cb["init_args"]["save_last"] for cb in callbacks], [True, False]
-        )
+    """LightningCLI concatenates config callbacks onto trainer_defaults.
 
-    def test_mos_none_drops_the_val_mos_callback(self):
-        # Regression: ModelCheckpoint(monitor='val_mos') raises
-        # MisconfigurationException at the first epoch end when the model logs
-        # no val_mos, which is exactly what mos_metric 'none' produces.
-        plan = argmap.build(make_profile(model__mos_metric="none"))
-        monitors = [
-            cb["init_args"]["monitor"] for cb in plan.trainer["callbacks"]
+    So we can never emit a ModelCheckpoint: naming one adds a third callback
+    beside upstream's two, and naming an identical one is a hard RuntimeError
+    about two stateful callbacks sharing a state_key. Everything we want to
+    change about them is changed on the live objects instead.
+    """
+
+    def _policies(self, plan):
+        return [
+            cb
+            for cb in plan.trainer.get("callbacks", [])
+            if cb["class_path"].endswith("CheckpointPolicy")
         ]
-        self.assertEqual(monitors, ["val_mel"])
 
-    def test_offline_drops_the_val_mos_callback_too(self):
-        # Offline forces mos_metric to 'none'; the callback must follow.
-        plan = argmap.build(make_profile(), offline=True)
-        self.assertEqual(plan.model["mos_metric"], "none")
-        monitors = [
-            cb["init_args"]["monitor"] for cb in plan.trainer["callbacks"]
-        ]
-        self.assertNotIn("val_mos", monitors)
+    def test_we_never_emit_a_model_checkpoint(self):
+        # The regression that matters: emitting one is either a duplicate
+        # state_key RuntimeError or a silently doubled checkpoint set.
+        for kwargs in (
+            {},
+            {"model__mos_metric": "none"},
+            {"trainer__checkpoint_save_top_k": 2},
+            {"model__mos_metric": "none", "trainer__checkpoint_save_top_k": 2},
+        ):
+            with self.subTest(**kwargs):
+                plan = argmap.build(make_profile(**kwargs))
+                paths = [
+                    cb["class_path"] for cb in plan.trainer.get("callbacks", [])
+                ]
+                self.assertNotIn(
+                    "lightning.pytorch.callbacks.ModelCheckpoint", paths
+                )
 
-    def test_val_mel_still_writes_last_ckpt_without_mos(self):
-        # Dropping a callback must not cost us last.ckpt, which is what
-        # './run resume' and the exporter both look for.
-        plan = argmap.build(make_profile(model__mos_metric="none"))
-        self.assertTrue(plan.trainer["callbacks"][0]["init_args"]["save_last"])
-
-    def test_callbacks_are_replaced_even_at_the_default_save_top_k(self):
-        # Leaving trainer.callbacks unset would let upstream's trainer_defaults
-        # reinstate the val_mos checkpoint, which is the crash.
-        plan = argmap.build(
-            make_profile(
-                model__mos_metric="none",
-                trainer__checkpoint_save_top_k=argmap.DEFAULT_SAVE_TOP_K,
-            )
-        )
-        self.assertIn("callbacks", plan.trainer)
-
-    def test_mos_enabled_at_the_default_leaves_callbacks_to_upstream(self):
+    def test_default_configuration_adds_no_callbacks_at_all(self):
         plan = argmap.build(make_profile())
         self.assertNotIn("callbacks", plan.trainer)
 
-    def test_dropping_the_callback_is_explained(self):
+    def test_changing_save_top_k_emits_one_policy(self):
+        plan = argmap.build(make_profile(trainer__checkpoint_save_top_k=2))
+        policies = self._policies(plan)
+        self.assertEqual(len(policies), 1)
+        self.assertEqual(policies[0]["init_args"]["save_top_k"], 2)
+
+    def test_mos_none_disables_the_val_mos_checkpoint(self):
+        plan = argmap.build(make_profile(model__mos_metric="none"))
+        policies = self._policies(plan)
+        self.assertEqual(policies[0]["init_args"]["disable_monitors"], ["val_mos"])
+
+    def test_offline_disables_it_too(self):
+        plan = argmap.build(make_profile(), offline=True)
+        self.assertEqual(plan.model["mos_metric"], "none")
+        policies = self._policies(plan)
+        self.assertIn("val_mos", policies[0]["init_args"]["disable_monitors"])
+
+    def test_both_adjustments_share_one_callback(self):
+        plan = argmap.build(
+            make_profile(model__mos_metric="none", trainer__checkpoint_save_top_k=2)
+        )
+        policies = self._policies(plan)
+        self.assertEqual(len(policies), 1)
+        self.assertEqual(policies[0]["init_args"]["save_top_k"], 2)
+        self.assertEqual(policies[0]["init_args"]["disable_monitors"], ["val_mos"])
+
+    def test_val_mel_is_never_disabled(self):
+        # It writes last.ckpt, which './run resume' and the exporter need.
+        plan = argmap.build(make_profile(model__mos_metric="none"))
+        policies = self._policies(plan)
+        self.assertNotIn("val_mel", policies[0]["init_args"]["disable_monitors"])
+
+    def test_disabling_is_explained(self):
         plan = argmap.build(make_profile(model__mos_metric="none"))
         self.assertTrue(
             any("val_mos" in note for note in plan.notes),
             "nothing is dropped silently",
         )
-
-    def test_callback_filenames_match_upstream(self):
-        callbacks = argmap.checkpoint_callbacks(5)
-        self.assertEqual(
-            callbacks[0]["init_args"]["filename"],
-            "epoch={epoch}-val_mel={val_mel:.4f}",
-        )
-        self.assertFalse(callbacks[0]["init_args"]["auto_insert_metric_name"])
 
     def test_callbacks_survive_yaml_round_trip(self):
         from pipertrainer import yamlio
@@ -601,6 +608,70 @@ class CheckpointCallbackTest(unittest.TestCase):
         text = yamlio.dumps(plan.config)
         restored = yamlio.loads(text)
         self.assertEqual(restored["trainer"]["callbacks"], plan.trainer["callbacks"])
+
+
+class CheckpointPolicyTest(unittest.TestCase):
+    """The pure half of train/callbacks.py, exercised without lightning."""
+
+    class FakeCheckpoint:
+        def __init__(self, monitor, save_top_k=5):
+            self.monitor = monitor
+            self.save_top_k = save_top_k
+
+    def _pair(self):
+        return [self.FakeCheckpoint("val_mel"), self.FakeCheckpoint("val_mos")]
+
+    def test_disabling_sets_save_top_k_to_zero(self):
+        # Zero specifically: _save_topk_checkpoint returns on it before it
+        # checks whether the monitored key exists.
+        from pipertrainer.train import callbacks as cb_mod
+
+        checkpoints = self._pair()
+        cb_mod.apply_policy(checkpoints, disable_monitors=["val_mos"])
+        self.assertEqual(checkpoints[1].save_top_k, 0)
+
+    def test_disabling_leaves_the_other_checkpoint_alone(self):
+        from pipertrainer.train import callbacks as cb_mod
+
+        checkpoints = self._pair()
+        cb_mod.apply_policy(checkpoints, disable_monitors=["val_mos"])
+        self.assertEqual(checkpoints[0].save_top_k, 5)
+
+    def test_save_top_k_retunes_every_live_checkpoint(self):
+        from pipertrainer.train import callbacks as cb_mod
+
+        checkpoints = self._pair()
+        cb_mod.apply_policy(checkpoints, save_top_k=2)
+        self.assertEqual([c.save_top_k for c in checkpoints], [2, 2])
+
+    def test_a_disabled_checkpoint_is_not_then_retuned(self):
+        from pipertrainer.train import callbacks as cb_mod
+
+        checkpoints = self._pair()
+        cb_mod.apply_policy(
+            checkpoints, save_top_k=2, disable_monitors=["val_mos"]
+        )
+        self.assertEqual([c.save_top_k for c in checkpoints], [2, 0])
+
+    def test_every_change_is_reported(self):
+        from pipertrainer.train import callbacks as cb_mod
+
+        changes = cb_mod.apply_policy(
+            self._pair(), save_top_k=2, disable_monitors=["val_mos"]
+        )
+        self.assertEqual(len(changes), 2)
+
+    def test_no_op_reports_nothing(self):
+        from pipertrainer.train import callbacks as cb_mod
+
+        self.assertEqual(cb_mod.apply_policy(self._pair()), [])
+
+    def test_it_imports_without_lightning(self):
+        # Our CLI runs outside the venv on a bare clone; only the training
+        # subprocess has lightning.
+        from pipertrainer.train import callbacks as cb_mod
+
+        self.assertTrue(callable(cb_mod.apply_policy))
 
 
 class MiscTest(unittest.TestCase):

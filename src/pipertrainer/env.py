@@ -35,7 +35,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import pins, proc
-from .paths import ENV_SH, SETUP_STATE, STATE_DIR, TORCH_CONSTRAINT, venv_python
+from .paths import (
+    ENV_SH,
+    REPO_ROOT,
+    SETUP_STATE,
+    STATE_DIR,
+    TORCH_CONSTRAINT,
+    venv_python,
+)
 
 if TYPE_CHECKING:
     # Imported for real inside the functions that need it, matching how the
@@ -643,6 +650,17 @@ def training_env(
     state = SetupState.load()
     profile = resolved_hardware(hardware_name)
     env: dict[str, str] = {}
+
+    # lightning.yaml can name a class_path inside this package (the checkpoint
+    # policy in train/callbacks.py). ./run already exports this, but making it
+    # explicit means the recorded command reproduces by hand and --print_config
+    # can resolve the class the same way the real run does.
+    src = str(REPO_ROOT / "src")
+    inherited = os.environ.get("PYTHONPATH", "")
+    parts = [p for p in inherited.split(os.pathsep) if p]
+    if src not in parts:
+        parts.insert(0, src)
+    env["PYTHONPATH"] = os.pathsep.join(parts)
 
     if state.hsa_override and "HSA_OVERRIDE_GFX_VERSION" not in profile.banned_env:
         env["HSA_OVERRIDE_GFX_VERSION"] = state.hsa_override

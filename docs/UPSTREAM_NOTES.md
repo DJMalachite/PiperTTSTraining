@@ -89,10 +89,35 @@ Upstream's own comment explains why there is no early stopping: mel L1 saturates
 early in VITS while the adversarial losses keep removing audible artifacts, so
 an early stop on `val_mel` fires well before the audio is clean.
 
-**We do:** surface `max_epochs: -1` as a note rather than a surprise. Changing
-`trainer.checkpoint_save_top_k` replicates *both* callbacks faithfully, because
-setting `trainer.callbacks` replaces `trainer_defaults` wholesale. `./run monitor
---prune` exists because ten checkpoints at ~0.9 GB is about 10 GB per run.
+**`trainer.callbacks` does not replace `trainer_defaults` — it concatenates.**
+This note previously claimed the opposite, and the claim was wrong.
+`LightningCLI._instantiate_trainer` does:
+
+```python
+config[key].extend(callbacks)
+if key in self.trainer_defaults:
+    config[key] += self.trainer_defaults[key]
+```
+
+So naming a `ModelCheckpoint` in the config *adds a third one*, and naming one
+whose init args match an upstream default is a hard failure, because two
+stateful callbacks of the same type may not share a `state_key`:
+
+```
+RuntimeError: Found more than one stateful callback of type `ModelCheckpoint`
+```
+
+There is therefore no configuration that removes or retunes upstream's
+checkpoints. This also means the old implementation of
+`trainer.checkpoint_save_top_k` never worked: it produced four checkpoint
+callbacks, two at the requested `save_top_k` and two still at upstream's five.
+
+**We do:** surface `max_epochs: -1` as a note rather than a surprise, and reach
+the live objects instead of trying to replace them.
+`train/callbacks.py::CheckpointPolicy` is listed in `trainer.callbacks`, is
+constructed alongside upstream's, and adjusts them in `setup` — long before the
+first epoch ends. `./run monitor --prune` exists because ten checkpoints at
+~0.9 GB is about 10 GB per run.
 
 ## 6. UTMOS failure is non-fatal, but *disabling* UTMOS is fatal
 
@@ -118,15 +143,25 @@ returned metrics: ['loss_g', ..., 'val_disc', 'epoch', 'step']
 ```
 
 The two upstream defaults are consistent with each other, so this never fires
-for a default online run. It fires for anyone who sets `mos_metric: none` — which
-includes every offline run, and the `bc250` example profile.
+for a default online run whose hub fetch succeeds. It fires for anyone who sets
+`mos_metric: none` — which includes every offline run and the `bc250` example
+profile — **and equally for an online run whose fetch fails**, because
+`MosPredictor.score()` returns `None` once `_disabled` is set, leaving
+`mos_scores` empty and `val_mos` unlogged. The graceful degradation in `mos.py`
+protects the metric, not the run.
 
 **We do:** `argmap` treats the two as one decision. When `model.mos_metric`
-resolves to `none`, `trainer.callbacks` is set to the `val_mel` checkpoint alone
-— and it is set *even at the default `save_top_k`*, because leaving it unset lets
-`trainer_defaults` reinstate the callback that crashes. `val_mel` keeps
+resolves to `none`, the emitted `CheckpointPolicy` carries
+`disable_monitors: [val_mos]`, which sets that checkpoint's `save_top_k` to 0.
+Zero is the value that matters: `_save_topk_checkpoint` returns on it *before*
+testing whether the monitored key is present. `val_mel` is untouched and keeps
 `save_last=True`, so `last.ckpt` still exists for `./run resume` and export.
-Regression tests in `tests/test_argmap.py::CheckpointCallbackTest`.
+Regression tests in `tests/test_argmap.py::CheckpointCallbackTest` and
+`::CheckpointPolicyTest`.
+
+Not covered: an online run that loses the network at first validation still
+dies at the end of epoch 1. Detecting that in advance would mean fetching UTMOS
+during setup, which we do not do.
 
 ## 7. Cache ids embed the row number and the text
 
