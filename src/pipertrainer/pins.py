@@ -75,6 +75,12 @@ class Pins:
     def python_prefer(self) -> list[str]:
         return list(self.raw["python"]["prefer"])
 
+    # --- build backend ----------------------------------------------------
+    @property
+    def build_requires(self) -> list[str]:
+        """What piper1-gpl's setup.py needs when run outside pip's isolation."""
+        return list(self.raw["build"]["requires"])
+
     # --- whisper ----------------------------------------------------------
     @property
     def whisper_package(self) -> str:

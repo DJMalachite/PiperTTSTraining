@@ -266,6 +266,25 @@ exit is not proof the extension is importable.
 `torch>=2,<3` is the important one: it is satisfied by *any* torch 2.x, including
 whichever one PyPI serves by default.
 
+`from skbuild import setup` matters for a second reason. `pip install -e .`
+builds in isolation, so pip materialises `scikit-build` from
+`build-system.requires` into a throwaway environment and discards it. Our
+`build_ext` step runs `setup.py build_ext --inplace` *directly* with the venv
+interpreter, where that environment does not exist, and the import fails:
+
+```
+ModuleNotFoundError: No module named 'skbuild'
+```
+
+The traceback is actively misleading — `skbuild` is the *import* name of the
+PyPI package `scikit-build`, so searching for "skbuild" in a distro package
+manager finds nothing, and a venv could not see a system package anyway.
+
+**We do:** install `[build].requires` from `pins.toml` into the venv at the top
+of `step_build_ext` (`scikit-build`, plus `cmake` and `ninja`, which skbuild
+shells out to), and map this traceback to an explicit message in
+`install._explain_build_failure`.
+
 ## 18. espeak-ng is built from source and embedded
 
 `CMakeLists.txt` adds espeak-ng as an `ExternalProject` at `GIT_TAG 724808c`,

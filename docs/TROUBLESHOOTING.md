@@ -124,6 +124,29 @@ needs three things:
 The installer maps these to explicit messages. The full build log is in
 `.state/setup.log`.
 
+## `ModuleNotFoundError: No module named 'skbuild'`
+
+From the `build_ext` step. `skbuild` is the **import** name of the PyPI package
+`scikit-build`, so no distro package provides it, and a venv could not see a
+system package if one did.
+
+```bash
+./run setup --force-step build_ext
+```
+
+That step installs `[build].requires` from `pins.toml` into `.venv` before
+running upstream's `setup.py`. The gap it closes: `piper_install` builds through
+pip, which creates an isolated environment from upstream's
+`build-system.requires` and then discards it, while `build_ext` runs
+`setup.py build_ext --inplace` directly with the venv interpreter — no isolated
+environment, no `skbuild`.
+
+If you install it by hand, pass the constraint like every other pip call:
+
+```bash
+PIP_CONSTRAINT=.state/torch-constraint.txt .venv/bin/python -m pip install scikit-build cmake ninja
+```
+
 ## "monotonic_align" is missing
 
 The VITS alignment kernel is a Cython extension built by a separate script, and a

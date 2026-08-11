@@ -474,7 +474,17 @@ def step_piper_install(ctx: Context) -> None:
 
 def _explain_build_failure(result: proc.Result) -> None:
     text = result.output.lower()
-    if "cmake" in text and ("version" in text or "3.26" in text):
+    if "no module named 'skbuild'" in text:
+        # The bare traceback sends people to their distro package manager,
+        # which cannot help: 'skbuild' is the *import* name of the PyPI
+        # package 'scikit-build', and a venv cannot see system site-packages.
+        tui.error(
+            "piper1-gpl's setup.py needs scikit-build, which must be installed "
+            "into .venv — 'skbuild' is the import name of the PyPI package "
+            "'scikit-build', so no distro package provides it. Re-run "
+            "'./run setup --force-step build_ext'."
+        )
+    elif "cmake" in text and ("version" in text or "3.26" in text):
         tui.error(
             "the espeak-ng build needs CMake 3.26 or newer. Install a newer "
             "cmake, or let pip fetch one by removing the system cmake from PATH."
@@ -530,11 +540,26 @@ def step_monotonic_align(ctx: Context) -> None:
 def step_build_ext(ctx: Context) -> None:
     # Needed because we run piper from its source tree: this builds the
     # espeakbridge C extension in place.
-    proc.run(
-        [venv_python(), "setup.py", "build_ext", "--inplace"],
-        cwd=PIPER_DIR,
-        log_path=ctx.log_path,
+    #
+    # setup.py is invoked directly rather than through pip, so the isolated
+    # build environment that supplied skbuild during piper_install does not
+    # exist here. Upstream's build requirements have to be in our own venv.
+    tui.info("installing piper's build requirements into the venv")
+    tui.hint(
+        "  piper1-gpl's setup.py does 'from skbuild import setup'. pip's build "
+        "isolation supplied that for the editable install and then threw it "
+        "away; running setup.py by hand needs it installed for real."
     )
+    ctx.pip("install", *ctx.pins.build_requires)
+    try:
+        proc.run(
+            [venv_python(), "setup.py", "build_ext", "--inplace"],
+            cwd=PIPER_DIR,
+            log_path=ctx.log_path,
+        )
+    except proc.CommandFailed as exc:
+        _explain_build_failure(exc.result)
+        raise
     tui.ok("espeakbridge extension built in place")
 
 

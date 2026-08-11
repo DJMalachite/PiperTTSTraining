@@ -19,6 +19,23 @@ min = "3.11"
 # (numba/llvmlite, which openai-whisper needs, tends to lag new CPython).
 prefer = ["python3.13", "python3.12", "python3.11", "python3"]
 
+[build]
+# Build requirements for piper1-gpl's own setup.py, installed into our venv.
+#
+# They are *not* redundant with pip's build isolation. `piper_install` builds
+# through pip, which creates a throwaway environment from upstream's
+# build-system.requires and discards it. `build_ext` then runs
+# `setup.py build_ext --inplace` directly with our venv interpreter, where no
+# such environment exists — so `from skbuild import setup` fails with
+# ModuleNotFoundError unless these are installed here.
+#
+# scikit-build (classic, not scikit-build-core) is what upstream imports; 0.18
+# is the floor because earlier releases still reach for the stdlib distutils
+# that 3.12 removed. cmake and ninja are listed because skbuild shells out to
+# them, and pip's wheels satisfy espeak-ng's 3.26 floor on distros that ship
+# something older.
+requires = ["scikit-build>=0.18,<1", "cmake>=3.26", "ninja>=1.11"]
+
 [whisper]
 # Installed with --no-deps; see [whisper.deps]. Pinning matters because
 # openai-whisper's own metadata requires an unpinned torch plus CUDA-flavoured
