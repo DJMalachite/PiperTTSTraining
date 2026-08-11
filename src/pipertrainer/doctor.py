@@ -109,6 +109,13 @@ def _onnx():
     import onnxruntime
     return onnxruntime.__version__
 check("onnxruntime", _onnx)
+
+def _onnxscript():
+    # torch >= 2.9 imports onnxscript inside torch.onnx.export. Missing, it
+    # fails only at export time, with a trained checkpoint already on disk.
+    import torch.onnx, onnxscript
+    return onnxscript.__version__
+check("onnxscript", _onnxscript)
 print(json.dumps(report))
 """
 
@@ -492,6 +499,11 @@ def _import_fix(name: str) -> str:
         )
     if name == "onnxruntime":
         return "export verification needs it; run './run setup --force-step piper_install'"
+    if name == "onnxscript":
+        return (
+            "torch.onnx.export cannot load without it, so export fails after "
+            "training; run './run setup --force-step export_deps'"
+        )
     return "run './run setup'"
 
 

@@ -42,6 +42,55 @@ class BuildRequiresTest(unittest.TestCase):
         self.assertNotIn("scikit-build-core", self.pins.build_requires)
 
 
+class ExportRequiresTest(unittest.TestCase):
+    """torch.onnx.export needs onnxscript, and nothing else declares it.
+
+    piper1-gpl does not list it in [train], and torch 2.9 imports it
+    unconditionally from torch.onnx. Without this section, export fails with
+    ModuleNotFoundError after training has already completed.
+    """
+
+    def setUp(self):
+        self.pins = pins_mod.load()
+
+    def test_export_requires_is_present_and_non_empty(self):
+        self.assertTrue(self.pins.export_requires)
+
+    def test_onnxscript_is_required(self):
+        joined = " ".join(self.pins.export_requires)
+        self.assertIn("onnxscript", joined)
+
+    def test_it_is_pinned_rather_than_floating(self):
+        # Same reasoning as the whisper pin: an unpinned resolve is how a
+        # dependency change arrives without anyone deciding on it.
+        for req in self.pins.export_requires:
+            with self.subTest(req=req):
+                self.assertIn("==", req)
+
+    def test_torch_is_not_pulled_in_here(self):
+        # onnxscript has no torch dependency; naming one here would be a way
+        # to replace a vendor wheel by accident.
+        joined = " ".join(self.pins.export_requires)
+        self.assertNotIn("torch", joined)
+
+
+class InstallStepTest(unittest.TestCase):
+    def test_export_deps_runs_after_the_torch_constraint(self):
+        # Installing before the constraint file exists is what lets pip
+        # resolve a different torch.
+        from pipertrainer import install
+
+        names = [step.name for step in install.STEPS]
+        self.assertIn("export_deps", names)
+        self.assertGreater(names.index("export_deps"), names.index("constraint"))
+
+    def test_export_deps_runs_before_verify(self):
+        from pipertrainer import install
+
+        names = [step.name for step in install.STEPS]
+        self.assertLess(names.index("export_deps"), names.index("verify"))
+
+
 class TorchPinTest(unittest.TestCase):
     def setUp(self):
         self.pins = pins_mod.load()

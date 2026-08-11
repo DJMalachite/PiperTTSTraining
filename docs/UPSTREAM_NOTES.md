@@ -94,17 +94,39 @@ an early stop on `val_mel` fires well before the audio is clean.
 setting `trainer.callbacks` replaces `trainer_defaults` wholesale. `./run monitor
 --prune` exists because ten checkpoints at ~0.9 GB is about 10 GB per run.
 
-## 6. UTMOS failure is already non-fatal
+## 6. UTMOS failure is non-fatal, but *disabling* UTMOS is fatal
+
+Two halves that have to be read together.
 
 `src/piper/train/vits/mos.py:39-52` wraps
 `torch.hub.load("tarepan/SpeechMOS:v1.2.0", "utmos22_strong")` in
 `try/except Exception` and sets `_disabled = True` on failure. It is loaded
-lazily at first validation, not at startup. `vits/lightning.py:176` accepts
-either `None` or the string `"none"` to disable it.
+lazily at first validation, not at startup. So a failed *download* really is
+harmless.
 
-**We do:** offline mode sets `mos_metric: none`, and says in as many words that
-this saves a hub timeout and a warning rather than fixing a crash. Overstating it
-would send people hunting for a problem they do not have.
+Turning the metric off is not. `VitsModel.__init__` takes
+`mos_metric: Optional[str] = "utmos"` and builds a predictor only when the value
+is neither `None` nor `"none"`; `on_validation_epoch_end` logs `val_mos` only
+when a predictor exists. Meanwhile `_DEFAULT_CALLBACKS` monitors `val_mos`
+unconditionally (note 5). `ModelCheckpoint` raises
+`MisconfigurationException` the first time its monitored key is missing from the
+logged metrics — at the end of epoch 1, after real training work:
+
+```
+`ModelCheckpoint(monitor='val_mos')` could not find the monitored key in the
+returned metrics: ['loss_g', ..., 'val_disc', 'epoch', 'step']
+```
+
+The two upstream defaults are consistent with each other, so this never fires
+for a default online run. It fires for anyone who sets `mos_metric: none` — which
+includes every offline run, and the `bc250` example profile.
+
+**We do:** `argmap` treats the two as one decision. When `model.mos_metric`
+resolves to `none`, `trainer.callbacks` is set to the `val_mel` checkpoint alone
+— and it is set *even at the default `save_top_k`*, because leaving it unset lets
+`trainer_defaults` reinstate the callback that crashes. `val_mel` keeps
+`save_last=True`, so `last.ckpt` still exists for `./run resume` and export.
+Regression tests in `tests/test_argmap.py::CheckpointCallbackTest`.
 
 ## 7. Cache ids embed the row number and the text
 
@@ -226,6 +248,27 @@ the value actually trained at and `piper_version` to 1.6.0, keeps the untouched
 original as `.onnx.json.from-training`, and prints the diff. A sample-rate
 disagreement is treated as a hard error — that means the config belongs to a
 different run — not a fixup.
+
+## 13b. `export_onnx` needs a package upstream does not declare
+
+`piper.train.export_onnx` calls `torch.onnx.export`. As of torch 2.9 the dynamo
+exporter is the default path, and `torch/onnx/__init__.py:282` imports
+`torch.onnx._internal.exporter._compat` on the way in, which imports
+`onnxscript`. Nothing in piper1-gpl's dependencies or its `[train]` extra
+mentions `onnxscript`, and `onnxruntime` — which piper *does* depend on, for
+inference — does not provide it.
+
+The result is a `ModuleNotFoundError: No module named 'onnxscript'` raised at the
+worst possible moment: training has finished, the checkpoint is on disk, and the
+export is the only step left.
+
+**We do:** pin it in `pins.toml` under `[export]` and install it in its own
+`export_deps` step, ordered after `constraint` so `PIP_CONSTRAINT` is protecting
+the vendor torch. onnxscript has no torch dependency of its own (onnx, onnx_ir,
+ml_dtypes, numpy, packaging, typing_extensions), so it cannot pull a CUDA build
+into a ROCm environment. `./run doctor` and the setup verification both import
+`torch.onnx` *and* `onnxscript`, so the gap is reported before training rather
+than after.
 
 ## 14. TensorBoard already logs listenable audio
 

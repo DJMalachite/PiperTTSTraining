@@ -499,7 +499,14 @@ class OfflineTest(unittest.TestCase):
         # offline training works either way. The message must not overclaim.
         plan = argmap.build(make_profile(), offline=True)
         note = next(n for n in plan.notes if "torch.hub" in n)
-        self.assertIn("not a crash fix", note)
+        self.assertIn("rather than a crash", note)
+
+    def test_offline_note_owns_up_to_the_checkpoint_consequence(self):
+        # Forcing mos_metric off is not free: it costs the val_mos checkpoint,
+        # and nothing is dropped silently.
+        plan = argmap.build(make_profile(), offline=True)
+        note = next(n for n in plan.notes if "torch.hub" in n)
+        self.assertIn("val_mos", note)
 
     def test_offline_refuses_a_missing_local_checkpoint(self):
         with self.assertRaises(argmap.ArgMapError) as ctx:
@@ -530,6 +537,53 @@ class CheckpointCallbackTest(unittest.TestCase):
         # Only the val_mel callback writes last.ckpt, matching upstream.
         self.assertEqual(
             [cb["init_args"]["save_last"] for cb in callbacks], [True, False]
+        )
+
+    def test_mos_none_drops_the_val_mos_callback(self):
+        # Regression: ModelCheckpoint(monitor='val_mos') raises
+        # MisconfigurationException at the first epoch end when the model logs
+        # no val_mos, which is exactly what mos_metric 'none' produces.
+        plan = argmap.build(make_profile(model__mos_metric="none"))
+        monitors = [
+            cb["init_args"]["monitor"] for cb in plan.trainer["callbacks"]
+        ]
+        self.assertEqual(monitors, ["val_mel"])
+
+    def test_offline_drops_the_val_mos_callback_too(self):
+        # Offline forces mos_metric to 'none'; the callback must follow.
+        plan = argmap.build(make_profile(), offline=True)
+        self.assertEqual(plan.model["mos_metric"], "none")
+        monitors = [
+            cb["init_args"]["monitor"] for cb in plan.trainer["callbacks"]
+        ]
+        self.assertNotIn("val_mos", monitors)
+
+    def test_val_mel_still_writes_last_ckpt_without_mos(self):
+        # Dropping a callback must not cost us last.ckpt, which is what
+        # './run resume' and the exporter both look for.
+        plan = argmap.build(make_profile(model__mos_metric="none"))
+        self.assertTrue(plan.trainer["callbacks"][0]["init_args"]["save_last"])
+
+    def test_callbacks_are_replaced_even_at_the_default_save_top_k(self):
+        # Leaving trainer.callbacks unset would let upstream's trainer_defaults
+        # reinstate the val_mos checkpoint, which is the crash.
+        plan = argmap.build(
+            make_profile(
+                model__mos_metric="none",
+                trainer__checkpoint_save_top_k=argmap.DEFAULT_SAVE_TOP_K,
+            )
+        )
+        self.assertIn("callbacks", plan.trainer)
+
+    def test_mos_enabled_at_the_default_leaves_callbacks_to_upstream(self):
+        plan = argmap.build(make_profile())
+        self.assertNotIn("callbacks", plan.trainer)
+
+    def test_dropping_the_callback_is_explained(self):
+        plan = argmap.build(make_profile(model__mos_metric="none"))
+        self.assertTrue(
+            any("val_mos" in note for note in plan.notes),
+            "nothing is dropped silently",
         )
 
     def test_callback_filenames_match_upstream(self):

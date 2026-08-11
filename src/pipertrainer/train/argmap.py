@@ -119,8 +119,16 @@ DATA_KEYS = (
 _CHECKPOINT_CLASS = "lightning.pytorch.callbacks.ModelCheckpoint"
 
 
-def checkpoint_callbacks(save_top_k: int) -> list[dict[str, Any]]:
-    return [
+def checkpoint_callbacks(save_top_k: int, *, mos: bool = True) -> list[dict[str, Any]]:
+    """Upstream's checkpoint callbacks, minus the ones that cannot fire.
+
+    ``mos=False`` drops the ``val_mos`` checkpoint. That is not a preference:
+    ``val_mos`` is logged only when the model has a MOS predictor, and
+    ``ModelCheckpoint`` raises ``MisconfigurationException`` at the first
+    epoch end when its monitored key is absent. Keeping both together is what
+    makes ``model.mos_metric: none`` a crash instead of a saving.
+    """
+    callbacks = [
         {
             "class_path": _CHECKPOINT_CLASS,
             "init_args": {
@@ -132,18 +140,22 @@ def checkpoint_callbacks(save_top_k: int) -> list[dict[str, Any]]:
                 "auto_insert_metric_name": False,
             },
         },
-        {
-            "class_path": _CHECKPOINT_CLASS,
-            "init_args": {
-                "monitor": "val_mos",
-                "mode": "max",
-                "save_top_k": save_top_k,
-                "save_last": False,
-                "filename": "epoch={epoch}-val_mos={val_mos:.4f}",
-                "auto_insert_metric_name": False,
-            },
-        },
     ]
+    if mos:
+        callbacks.append(
+            {
+                "class_path": _CHECKPOINT_CLASS,
+                "init_args": {
+                    "monitor": "val_mos",
+                    "mode": "max",
+                    "save_top_k": save_top_k,
+                    "save_last": False,
+                    "filename": "epoch={epoch}-val_mos={val_mos:.4f}",
+                    "auto_insert_metric_name": False,
+                },
+            }
+        )
+    return callbacks
 
 
 DEFAULT_SAVE_TOP_K = 5
@@ -500,8 +512,9 @@ def build(
         notes.append(
             "offline: model.mos_metric set to 'none'. UTMOS would otherwise be "
             "fetched from torch.hub at first validation. Upstream degrades "
-            "gracefully if that fails, so this only saves a timeout and a "
-            "warning — it is not a crash fix."
+            "gracefully if that fetch fails, so this saves a timeout rather "
+            "than a crash — but it does mean val_mos is never logged, which is "
+            "why the val_mos checkpoint callback comes off with it."
         )
     model["mos_metric"] = mos_metric or "none"
 
@@ -571,13 +584,25 @@ def build(
     if int(prof.trainer.accumulate_grad_batches) > 1:
         trainer["accumulate_grad_batches"] = int(prof.trainer.accumulate_grad_batches)
         warnings.append(NOOP_WARNINGS["trainer.accumulate_grad_batches"])
-    if int(prof.trainer.checkpoint_save_top_k) != DEFAULT_SAVE_TOP_K:
-        trainer["callbacks"] = checkpoint_callbacks(
-            int(prof.trainer.checkpoint_save_top_k)
-        )
+    # Upstream monitors val_mos unconditionally, but only logs it when a MOS
+    # predictor exists. With mos_metric 'none' the run dies at the end of the
+    # first epoch, so the callbacks must be replaced even at the default
+    # save_top_k — this is a crash fix, not a preference.
+    mos_enabled = model["mos_metric"] not in ("none", "")
+    save_top_k = int(prof.trainer.checkpoint_save_top_k)
+    if save_top_k != DEFAULT_SAVE_TOP_K or not mos_enabled:
+        trainer["callbacks"] = checkpoint_callbacks(save_top_k, mos=mos_enabled)
+    if save_top_k != DEFAULT_SAVE_TOP_K:
         notes.append(
-            f"keeping {prof.trainer.checkpoint_save_top_k} checkpoints per "
-            f"metric instead of upstream's {DEFAULT_SAVE_TOP_K}"
+            f"keeping {save_top_k} checkpoints per metric instead of "
+            f"upstream's {DEFAULT_SAVE_TOP_K}"
+        )
+    if not mos_enabled:
+        notes.append(
+            "model.mos_metric is 'none', so the val_mos checkpoint callback is "
+            "dropped. Upstream's default monitors a metric that is never "
+            "logged in that case and Lightning raises at the first epoch end. "
+            "Checkpoints are selected by val_mel."
         )
 
     if prof.trainer.precision != "32-true":

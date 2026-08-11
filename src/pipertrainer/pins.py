@@ -81,6 +81,12 @@ class Pins:
         """What piper1-gpl's setup.py needs when run outside pip's isolation."""
         return list(self.raw["build"]["requires"])
 
+    # --- export -----------------------------------------------------------
+    @property
+    def export_requires(self) -> list[str]:
+        """What `torch.onnx.export` needs that piper does not declare."""
+        return list(self.raw["export"]["requires"])
+
     # --- whisper ----------------------------------------------------------
     @property
     def whisper_package(self) -> str:

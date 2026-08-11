@@ -36,6 +36,20 @@ prefer = ["python3.13", "python3.12", "python3.11", "python3"]
 # something older.
 requires = ["scikit-build>=0.18,<1", "cmake>=3.26", "ninja>=1.11"]
 
+[export]
+# Needed by `piper.train.export_onnx`, which calls `torch.onnx.export`.
+#
+# Not a piper dependency and not in its [train] extra: torch 2.9 made the
+# dynamo exporter the default path, and `torch/onnx/__init__.py` imports
+# `onnxscript` unconditionally on the way in. Without it export dies with
+# ModuleNotFoundError *after* training has finished — the most expensive
+# possible moment to discover a missing package.
+#
+# Safe to install alongside a vendor torch wheel: onnxscript does not depend
+# on torch (its deps are onnx, onnx_ir, ml_dtypes, numpy, packaging,
+# typing_extensions), so it cannot drag in a CUDA build.
+requires = ["onnxscript==0.7.1"]
+
 [whisper]
 # Installed with --no-deps; see [whisper.deps]. Pinning matters because
 # openai-whisper's own metadata requires an unpinned torch plus CUDA-flavoured

@@ -568,6 +568,27 @@ def step_build_ext(ctx: Context) -> None:
 # --------------------------------------------------------------------------
 
 
+def step_export_deps(ctx: Context) -> None:
+    # Deliberately its own step, after torch is pinned by the constraint file.
+    # The failure this prevents lands at the end of a training run, when the
+    # checkpoint exists and the export is the only thing left.
+    tui.info("installing what torch.onnx.export needs")
+    tui.hint(
+        "  torch 2.9 made the dynamo exporter the default, and torch.onnx "
+        "imports onnxscript on the way in. piper does not declare it, so "
+        "export would otherwise fail only after training finished."
+    )
+    ctx.pip("install", *ctx.pins.export_requires)
+    assert_torch_unchanged(ctx, "export_deps")
+    result = env_mod.python_snippet("import onnxscript; print(onnxscript.__version__)")
+    if not result.ok:
+        raise SetupError(
+            "onnxscript is not importable after installation:\n"
+            + "\n".join(result.lines[-10:])
+        )
+    tui.ok(f"onnxscript {result.lines[-1].strip() if result.lines else 'importable'}")
+
+
 def step_whisper(ctx: Context) -> None:
     tui.info(f"installing {ctx.pins.whisper_package} without its dependencies")
     tui.hint(
@@ -636,6 +657,13 @@ def _lightning():
     import lightning
     return lightning.__version__
 
+def _onnxscript():
+    # Import torch.onnx rather than onnxscript alone: the failure we care
+    # about is torch's exporter refusing to load, and it imports onnxscript
+    # from inside torch.onnx.export.
+    import torch.onnx, onnxscript
+    return onnxscript.__version__
+
 check("piper", _piper)
 check("piper.train", _train)
 check("monotonic_align", _align)
@@ -644,6 +672,7 @@ check("librosa", _librosa)
 check("silero vad", _vad)
 check("whisper", _whisper)
 check("lightning", _lightning)
+check("onnxscript", _onnxscript)
 print(json.dumps(report))
 """
 
@@ -765,6 +794,7 @@ STEPS: list[Step] = [
     Step("monotonic_align", "Build the monotonic_align extension", step_monotonic_align),
     Step("build_ext", "Build the espeakbridge extension in place", step_build_ext),
     Step("whisper", "Install whisper without disturbing torch", step_whisper),
+    Step("export_deps", "Install onnxscript for ONNX export", step_export_deps),
     Step("verify", "Verify the whole toolchain", step_verify),
 ]
 
