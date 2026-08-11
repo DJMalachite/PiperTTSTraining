@@ -305,6 +305,39 @@ into a ROCm environment. `./run doctor` and the setup verification both import
 `torch.onnx` *and* `onnxscript`, so the gap is reported before training rather
 than after.
 
+## 13c. `export_onnx` needs the *TorchScript* exporter, not dynamo
+
+`export_onnx.py` calls `torch.onnx.export` with no `dynamo` argument — on
+`v1.6.0` and on `main` — and passes `dynamic_axes`, which is legacy-exporter
+API. It was written against the old default.
+
+torch 2.9 flipped that default to `dynamo=True`, routing the call through
+`torch.export.export`, which VITS does not survive:
+
+```
+File "vits/transforms.py", line 174, in rational_quadratic_spline
+    assert (discriminant >= 0).all(), discriminant
+GuardOnDataDependentSymNode: Could not guard on data-dependent expression
+Eq(u2, 1)
+```
+
+`rational_quadratic_spline` is called on `inputs[inside_interval_mask]`, so its
+leading dimension is an *unbacked* symint — a size that depends on tensor
+values, not shapes. `torch.export` must resolve the assert's `.all()` to a
+concrete bool at trace time and cannot. It is not a checkpoint problem and not
+a CPU/GPU problem: every Piper voice to date was exported through TorchScript,
+where the assert simply evaluates.
+
+**We do:** run the export through `train/export_shim.py`, which wraps
+`torch.onnx.export` to force `dynamo=False` and then calls upstream's `main()`
+with argv untouched. The wrapper is skipped on a torch too old to accept the
+argument. `train/export.py::export_command` is the single place the entrypoint
+is named, and `tests/test_export_shim.py` asserts we never point it back at
+`piper.train.export_onnx`.
+
+Delete the shim when upstream passes `dynamo` itself, or when VITS stops
+tripping `torch.export`.
+
 ## 14. TensorBoard already logs listenable audio
 
 `vits/lightning.py:394` calls `self.logger.experiment.add_audio(...)` from

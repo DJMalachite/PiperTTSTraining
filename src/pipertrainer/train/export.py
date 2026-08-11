@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import env as env_mod
 from .. import profile as profile_mod
 from .. import proc, tui
 from ..paths import REPO_ROOT, VoicePaths, venv_python
@@ -143,19 +144,31 @@ def _format(value: float | None) -> str:
 # --------------------------------------------------------------------------
 
 
+# Our shim rather than `piper.train.export_onnx` directly: torch 2.9 made the
+# dynamo exporter the default and VITS does not survive torch.export. The shim
+# forces the TorchScript path, then calls upstream's main() unchanged.
+# See train/export_shim.py.
+EXPORT_ENTRYPOINT = "pipertrainer.train.export_shim"
+
+
+def export_command(python: str, checkpoint: Path, destination: Path) -> list[str]:
+    return [
+        python,
+        "-m",
+        EXPORT_ENTRYPOINT,
+        "--checkpoint",
+        str(checkpoint),
+        "--output-file",
+        str(destination),
+    ]
+
+
 def export_onnx(checkpoint: Path, destination: Path, log_path: Path | None) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     proc.run(
-        [
-            venv_python(),
-            "-m",
-            "piper.train.export_onnx",
-            "--checkpoint",
-            str(checkpoint),
-            "--output-file",
-            str(destination),
-        ],
+        export_command(str(venv_python()), checkpoint, destination),
         cwd=REPO_ROOT,
+        env=env_mod.training_env(),
         log_path=log_path,
     )
     if not destination.exists() or destination.stat().st_size == 0:
