@@ -50,6 +50,27 @@ runcmd distrobox enter "$name" -- \
     refuse "package installation failed inside '$name'" \
         "The missing package is named above. Run 'distrobox enter $name' to look around."
 
+# distrobox shares $HOME, so `./run` inside the box would otherwise find the
+# host's .venv — a CachyOS venv executed under Fedora, which fails in confusing
+# ways rather than obvious ones. Declaring the environment here means every
+# shell in this container is the bc250 environment without anyone remembering
+# to say so. /etc is container-local, unlike $HOME, so this cannot leak to the
+# host; and it is written from inside for the same reason.
+head_ "Declaring this container the bc250 environment"
+runcmd distrobox enter "$name" -- sudo sh -c '
+set -eu
+cat >/etc/profile.d/bc250-env.sh <<EOF
+# Written by scripts/bc250/build.sh. Makes ./run use .venv-bc250 and
+# .state-bc250 instead of the host'"'"'s .venv, which shares this \$HOME.
+export PIPERTRAINER_ENV=bc250
+EOF
+# profile.d covers login shells; /etc/bashrc covers interactive ones, and which
+# of the two you get depends on how the container was entered.
+grep -q bc250-env /etc/bashrc 2>/dev/null ||
+    printf ". /etc/profile.d/bc250-env.sh\n" >>/etc/bashrc
+' || warn "could not write the environment file; prefix commands with PIPERTRAINER_ENV=bc250"
+ok "PIPERTRAINER_ENV=bc250 for every shell in this container"
+
 head_ "Verifying the GPU is visible in the container"
 if [ "$BC250_DRY_RUN" = "1" ]; then
     info "\$ distrobox enter $name -- rocminfo"

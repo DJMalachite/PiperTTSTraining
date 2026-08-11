@@ -72,15 +72,15 @@ ok "installed"
 # loader finds the patched library through LD_LIBRARY_PATH. Both are read by
 # './run doctor' too, so the check and the reality stay in agreement.
 head_ "Environment"
-profile=/etc/profile.d/bc250.sh
+profile=/etc/profile.d/bc250-rocblas.sh
 if [ "$BC250_DRY_RUN" != "1" ]; then
-    cat >"$BC250_STATE/bc250-profile.sh" <<EOF
+    cat >"$BC250_STATE/bc250-rocblas.sh" <<EOF
 # Written by scripts/bc250/build.sh. Points at the gfx1013 rocBLAS built from
 # source; delete this file to fall back to the system one.
 export LD_LIBRARY_PATH="$PREFIX/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 export ROCBLAS_TENSILE_LIBPATH="$PREFIX/lib/rocblas/library"
 EOF
-    run_root cp "$BC250_STATE/bc250-profile.sh" "$profile"
+    run_root cp "$BC250_STATE/bc250-rocblas.sh" "$profile"
 fi
 ok "$profile"
 
