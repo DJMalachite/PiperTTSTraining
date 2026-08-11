@@ -1,0 +1,5 @@
+#!/bin/sh
+# Convenience alias so a fresh clone has one obvious command: ./setup
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$here/run" setup "$@"

@@ -1,0 +1,368 @@
+# pipertrainer profile — safe to edit by hand.
+#
+# Regenerate the comments at any time with:  ./run profile --refresh <name>
+# Every setting maps to a piper1-gpl flag; see docs/TRAINING.md for the table.
+# Settings under `runtime` describe this machine and are not portable.
+
+schema: 1
+
+# Identity of the voice being trained.
+voice:
+
+  # Short name for this voice. Used for directory names and the exported
+  # filename, so keep it lowercase and hyphen-free.
+  name: myvoice
+
+  # Locale tag used only for the exported filename, e.g.
+  # en_US-myvoice-medium.onnx. Does not affect phonemization.
+  language: en_US
+
+  # espeak-ng voice used to turn text into phonemes. This DOES affect the
+  # model. Run './run doctor' to verify it phonemizes.
+  espeak_voice: en-us
+
+  # Architecture preset. 'medium' matches every pretrained checkpoint and is
+  # the only one you can fine-tune from without extra work. 'high' is bigger
+  # and slower; 'low' is medium's architecture at 16 kHz. (one of: medium,
+  # high, low)
+  quality: medium
+
+# How one long recording becomes clips plus transcripts.
+dataset:
+
+  # The single audio or video file to build the dataset from. Anything ffmpeg
+  # can read. This file is only ever read, never modified.
+  input_path: data/myvoice/source/recording.m4a
+
+  # 'align' cuts clips at Whisper word boundaries so each transcript matches
+  # its audio exactly — best quality. 'vad' segments on silence first and
+  # transcribes each clip, for audio Whisper struggles with. (one of: align,
+  # vad)
+  strategy: align
+
+  # Shortest clip to keep. Must stay at or above 1.0 s: piper pads every clip
+  # up to segment_size (0.372 s at 22.05 kHz) with silence, and short clips
+  # teach the model to produce silence. (range: 1.0..10.0; unit: s)
+  min_seconds: 1.0
+
+  # Preferred clip length. Clips are closed at the first sentence or pause
+  # boundary after this point. (range: 2.0..20.0; unit: s)
+  target_seconds: 8.0
+
+  # Hard ceiling. Longer groups are split recursively at their widest internal
+  # pause. Long clips dominate peak GPU memory — lower this first when you hit
+  # OOM. (range: 3.0..30.0; unit: s)
+  max_seconds: 14.0
+
+  # A silence at least this long counts as an utterance boundary. (range:
+  # 0.05..2.0; unit: s)
+  boundary_gap: 0.35
+
+  # Audio kept before the first word. piper trims silence itself with Silero
+  # VAD, so this only needs to avoid clipping the attack. (range: 0.0..1.0;
+  # unit: s)
+  pad_before: 0.15
+
+  # Audio kept after the last word. (range: 0.0..1.0; unit: s)
+  pad_after: 0.15
+
+  # Move cut points to the nearest zero crossing so clips do not start or end
+  # with a click.
+  snap_zero_crossing: true
+
+  # Silence length used for the first coarse pass, which breaks the recording
+  # into resumable chunks before transcription. (range: 0.3..; unit: s)
+  macro_silence_seconds: 1.5
+
+  # Maximum length of a coarse chunk. Keeping Whisper's context bounded stops
+  # timestamp drift on multi-hour recordings. (range: 30.0..; unit: s)
+  macro_max_seconds: 600.0
+
+  # Level below which audio counts as silence. 0 means estimate it from the
+  # recording's own noise floor, which is usually better than guessing a fixed
+  # value. (range: -90.0..0.0; unit: dBFS)
+  silence_dbfs: 0.0
+
+  # Optional prefix for clip filenames, e.g. 'sess1-' when merging several
+  # sessions by hand later.
+  id_prefix: ""
+
+  # Analyse and report without writing any WAV files. Useful for tuning the
+  # segmentation settings on a long recording.
+  dry_run: false
+  whisper:
+
+    # Whisper model size. 'turbo' is the best speed/accuracy trade for English;
+    # 'large-v3' is more accurate and much slower. (one of: tiny, base, small,
+    # medium, large-v2, large-v3, turbo)
+    model: turbo
+
+    # auto | cuda | cpu. 'auto' uses the GPU when torch reports one. On ROCm,
+    # 'cuda' is correct — that is what the ROCm build calls itself. (one of:
+    # auto, cuda, cpu)
+    device: auto
+
+    # Source language code, or 'auto' to detect. Setting it explicitly is more
+    # reliable than detection on long recordings.
+    language: en
+
+    # Optional text biasing Whisper's vocabulary — useful for names, jargon and
+    # spelling conventions it keeps getting wrong.
+    initial_prompt: ""
+
+    # Feeding prior text back into the model improves fluency but causes
+    # repetition loops on long audio. Off is the safer default.
+    condition_on_previous_text: false
+
+    # Temperature fallback ladder. Whisper retries with the next value when a
+    # segment fails its quality thresholds.
+    temperature: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+    # Beam width for decoding. Higher is slower and marginally better. (range:
+    # 1..20)
+    beam_size: 5
+
+    # Half-precision inference. 'auto' enables it only on GPU — fp16 on CPU
+    # warns and falls back. (one of: auto, true, false)
+    fp16: auto
+  text:
+
+    # Append a full stop when a transcript has no terminal punctuation. Helps
+    # the model learn sentence-final prosody.
+    ensure_terminal_punctuation: true
+
+    # Remove Whisper's non-speech annotations such as [Music] or (laughs), which
+    # have no audio counterpart the model could learn.
+    drop_bracketed: true
+
+    # Fold curly quotes and en/em dashes to ASCII. espeak-ng handles both, but
+    # consistency reduces the phoneme inventory.
+    normalize_quotes: true
+
+    # Reject transcripts shorter than this many characters. (range: 1..)
+    min_chars: 2
+
+    # Reject clips below this many characters per second — usually a clip whose
+    # transcript is missing words. (range: 0.0..; unit: chars/s)
+    cps_min: 3.0
+
+    # Reject clips above this many characters per second — usually a clip
+    # carrying text that belongs to neighbouring audio. (range: 1.0..; unit:
+    # chars/s)
+    cps_max: 30.0
+
+# Output audio format for the generated clips.
+audio:
+
+  # Output sample rate, and the rate the model is trained at. 22050 for
+  # medium/high, 16000 for the low preset. (one of: 16000, 22050; unit: Hz)
+  sample_rate: 22050
+
+  # 'peak' scales each clip to peak_dbfs, 'loudnorm' targets perceptual
+  # loudness (slower, better for uneven recordings), 'none' leaves levels
+  # untouched. (one of: peak, loudnorm, none)
+  normalize: peak
+
+  # Peak target for 'peak' normalization. (range: -12.0..0.0; unit: dBFS)
+  peak_dbfs: -1.0
+
+  # High-pass filter cutoff, 0 to disable. 60-80 Hz removes rumble and
+  # handling noise that the vocoder would otherwise reproduce. (range: 0..300;
+  # unit: Hz)
+  highpass_hz: 0
+
+# Model-side training overrides (architecture comes from voice.quality).
+model:
+
+  # Generator learning rate. (range: 1e-06..)
+  learning_rate: 0.0002
+
+  # Discriminator learning rate. (range: 1e-06..)
+  learning_rate_d: 0.0001
+
+  # Per-epoch generator LR decay.
+  lr_decay: 0.999875
+
+  # Per-epoch discriminator LR decay.
+  lr_decay_d: 0.9999
+
+  # Epochs before LR decay begins. (range: 0..)
+  warmup_epochs: 0
+
+  # Weight of the mel reconstruction loss.
+  c_mel: 45
+
+  # Weight of the KL divergence loss.
+  c_kl: 1.0
+
+  # Audio window the discriminator sees, in samples. Must be a multiple of
+  # hop_length. Halving it is the second-best OOM lever after batch_size, but
+  # changes what the discriminator learns. (range: 1024..)
+  segment_size: 8192
+
+  # Set above 1 only for a multi-speaker metadata.csv (wav|speaker|text). This
+  # pipeline produces single-speaker datasets. (range: 1..)
+  num_speakers: 1
+
+  # Stochastic duration predictor. Leave on; off yields flatter prosody.
+  use_sdp: true
+
+  # Add the multi-resolution STFT discriminator: better high-frequency detail
+  # at no inference cost, but it forces finetune mode 'warmstart' because
+  # --ckpt_path strict-loads and fails on the extra keys.
+  use_mrd: false
+
+  # Perceptual quality metric logged during validation. 'utmos' downloads a
+  # model from torch.hub on first use; 'none' skips it, which is faster and
+  # required offline. (one of: utmos, none)
+  mos_metric: utmos
+
+  # Raw --model.* passthrough for anything not exposed above, e.g.
+  # {upsample_initial_channel: 384}. You own the consequences.
+  extra: {}
+
+# Datamodule settings: batching, splits, caching.
+data:
+
+  # Utterances per step. The single biggest lever on GPU memory. Must not
+  # exceed the training split size or the loader yields zero batches. (range:
+  # 1..)
+  batch_size: 16
+
+  # Fraction of clips held back for validation. (range: 0.0..0.5)
+  validation_split: 0.1
+
+  # Clips reserved for the audio samples logged to TensorBoard. (range: 0..)
+  num_test_examples: 5
+
+  # Dataloader worker processes. piper forces persistent_workers and
+  # prefetch_factor=4 whenever this is above 0, so each worker costs real RAM
+  # — which an APU shares with the GPU. 0 is the smallest footprint. (range:
+  # 0..16)
+  num_workers: 2
+
+  # Let piper trim leading/trailing silence with Silero VAD during caching.
+  # Shorter clips mean less padding and less memory.
+  trim_silence: true
+
+  # Silence retained before speech when trimming. (range: 0.0..; unit: s)
+  keep_seconds_before_silence: 0.25
+
+  # Silence retained after speech when trimming. (range: 0.0..; unit: s)
+  keep_seconds_after_silence: 0.25
+
+  # 'espeak' phonemizes the text column. 'text' treats the column as literal
+  # phonemes; 'pinyin' and 'hebrew' need extra upstream setup. (one of:
+  # espeak, text, pinyin, hebrew)
+  phoneme_type: espeak
+
+  # 'text' or 'phoneme_ids'. Note upstream's TRAINING.md calls the flag
+  # --data.data_type; that is a doc typo, the real one is dataset_type. (one
+  # of: text, phoneme_ids)
+  dataset_type: text
+
+  # Optional JSON phoneme->id map copied into the voice config, for matching
+  # an existing model's phoneme inventory.
+  phonemes_path: ""
+
+  # Size of the phoneme inventory. Leave at 256 unless you are supplying your
+  # own phoneme ids; it must match any checkpoint you fine-tune from. (range:
+  # 2..)
+  num_symbols: 256
+
+# PyTorch Lightning trainer settings.
+trainer:
+
+  # auto | gpu | cpu. 'gpu' is correct for both CUDA and ROCm. (one of: auto,
+  # gpu, cpu)
+  accelerator: auto
+
+  # Device count or list, e.g. 'auto', '1', '[0]'.
+  devices: auto
+
+  # 32-true is the safe default: piper uses manual optimization with a GAN,
+  # and mixed precision is the least-tested combination. RDNA2 has no bf16
+  # matrix path, so bf16 buys nothing there. (one of: 32-true, bf16-mixed,
+  # 16-mixed, 64-true)
+  precision: "32-true"
+
+  # -1 trains until you stop it, which is upstream's default and normal for
+  # VITS — mel loss saturates long before the audio stops improving. (range:
+  # -1..)
+  max_epochs: -1
+
+  # Optional step ceiling; -1 for none. (range: -1..)
+  max_steps: -1
+
+  # Validation synthesizes full utterances and is often the real memory peak;
+  # raising this is a cheap OOM lever. (range: 1..)
+  check_val_every_n_epoch: 1
+
+  # TensorBoard scalar logging interval. (range: 1..)
+  log_every_n_steps: 25
+
+  # Almost certainly inert here: piper sets automatic_optimization=False, and
+  # Lightning does not apply accumulation for manual optimization. Raise
+  # batch_size instead. (range: 1..)
+  accumulate_grad_batches: 1
+
+  # Turn off for clean logs over SSH or in CI.
+  enable_progress_bar: true
+
+  # Checkpoints kept per metric. Upstream keeps 5 by val_mel plus 5 by val_mos
+  # plus last — roughly 10 GB per run at ~0.9 GB each. (range: 1..20)
+  checkpoint_save_top_k: 5
+
+# Starting point: a pretrained checkpoint, or from scratch.
+finetune:
+
+  # 'ckpt_path' resumes from a checkpoint strictly and is what upstream
+  # recommends — it needs a matching architecture. 'vocoder_warmstart' copies
+  # only the vocoder, so the phoneme count may differ. 'warmstart' copies
+  # every matching-shape parameter with a fresh optimizer, and is required
+  # when use_mrd is on. 'none' trains from scratch, which takes far longer.
+  # (one of: none, ckpt_path, warmstart, vocoder_warmstart)
+  mode: ckpt_path
+
+  # Path to a .ckpt. Use './run checkpoints' to browse and download one from
+  # HuggingFace.
+  checkpoint: ""
+
+# Machine-specific settings. Not portable between boxes.
+runtime:
+
+  # GPU vendor: rocm | cuda | cpu. Empty means autodetect. This decides which
+  # torch wheel gets installed and cannot be changed without reinstalling
+  # torch. (one of: , rocm, cuda, cpu)
+  vendor: ""
+
+  # No network calls: no checkpoint downloads, HF_HUB_OFFLINE=1, and
+  # mos_metric forced to 'none' to skip a torch.hub timeout.
+  offline: false
+
+  # Apply the small-GPU overlay (smaller batch, fewer workers, 32-true). Set
+  # automatically when a detected GPU has 16 GB or less.
+  low_vram: false
+
+  # Extra environment variables for training, e.g. HSA_OVERRIDE_GFX_VERSION
+  # for a gfx1013 board like the BC-250.
+  env: {}
+
+# ONNX export and the inference defaults baked into the config.
+export:
+
+  # Where the .onnx and .onnx.json land. Empty means voices/<name>/.
+  output_dir: ""
+
+  # 'auto' builds <language>-<name>-<quality> from the voice section, which is
+  # the naming other Piper tooling expects.
+  filename: auto
+
+  # Inference default written into the voice config: variation in timbre.
+  noise_scale: 0.667
+
+  # Inference default: speaking rate. Above 1.0 is slower.
+  length_scale: 1.0
+
+  # Inference default: variation in phoneme duration.
+  noise_w: 0.8

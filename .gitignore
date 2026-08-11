@@ -1,0 +1,21 @@
+# Runtime artifacts — none of this belongs in git.
+.venv/
+piper1-gpl/
+.state/
+data/
+runs/
+voices/
+checkpoints/
+profiles/*.yaml
+!profiles/example-*.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+
+# Editors / OS
+*.swp
+.DS_Store

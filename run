@@ -1,0 +1,41 @@
+#!/bin/sh
+# Entry point for everything in this repo.
+#
+#   ./run              interactive menu
+#   ./run setup        install toolchain + piper1-gpl
+#   ./run doctor       diagnose the environment
+#   ./run dataset      build a dataset from one audio file
+#   ./run train        train
+#   ./run --help       full command list
+#
+# Prefers the project venv; falls back to a system python only so that a fresh
+# clone can bootstrap itself. Anything past `setup` needs the venv.
+set -eu
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$here"
+
+# Persisted environment (e.g. HSA_OVERRIDE_GFX_VERSION) discovered by setup.
+if [ -f .state/env.sh ]; then
+    # shellcheck disable=SC1091
+    . ./.state/env.sh
+fi
+
+PYTHONPATH="$here/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+# Unbuffered so streamed subprocess output interleaves correctly in a log.
+PYTHONUNBUFFERED=1
+export PYTHONUNBUFFERED
+
+if [ -x .venv/bin/python ]; then
+    exec .venv/bin/python -m pipertrainer "$@"
+fi
+
+for candidate in python3.13 python3.12 python3.11 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        exec "$candidate" -m pipertrainer "$@"
+    fi
+done
+
+echo "error: no python interpreter found on PATH (need 3.11+)" >&2
+exit 1

@@ -1,0 +1,66 @@
+# Single source of truth for every external version this repo depends on.
+#
+# Bumping anything here — especially [piper] — requires re-running the
+# verification checklist in docs/UPSTREAM_NOTES.md. The golden tests in
+# tests/test_argmap.py exist so that a silent upstream flag change fails loudly.
+
+[piper]
+repo = "https://github.com/OHF-Voice/piper1-gpl"
+tag = "v1.6.0"
+sha = "f04d52c5528ac7cf2d73757f57990ff490f75005"
+# espeak-ng is built from source by piper1-gpl's CMakeLists at this pinned tag.
+# Recorded here only so we can tell the user what the build is fetching.
+espeak_ng_tag = "724808c"
+
+[python]
+# Our wrapper needs tomllib (3.11+). Upstream piper itself allows >=3.9.
+min = "3.11"
+# Probed in this order; first hit wins. 3.14+ is allowed but warned about
+# (numba/llvmlite, which openai-whisper needs, tends to lag new CPython).
+prefer = ["python3.13", "python3.12", "python3.11", "python3"]
+
+[whisper]
+# Installed with --no-deps; see [whisper.deps]. Pinning matters because
+# openai-whisper's own metadata requires an unpinned torch plus CUDA-flavoured
+# triton, either of which will happily replace a ROCm torch build.
+package = "openai-whisper==20250625"
+deps = ["more-itertools", "numba", "numpy", "tiktoken", "tqdm"]
+
+# Torch wheels, per GPU vendor. Always installed with --index-url (a full index
+# replacement, not --extra-index-url): download.pytorch.org mirrors torch's
+# generic dependencies, so a full replacement is safe and is what actually
+# prevents a CUDA wheel sneaking into a ROCm environment.
+[torch.rocm]
+index = "https://download.pytorch.org/whl/rocm6.4"
+spec = "torch==2.9.1"
+# Alternatives, newest first. ROCm 7.x has been progressively dropping gfx10
+# targets, so the default deliberately is not the newest.
+alternatives = [
+  { index = "https://download.pytorch.org/whl/rocm7.2", spec = "torch==2.13.0" },
+  { index = "https://download.pytorch.org/whl/rocm7.0", spec = "torch==2.10.0" },
+  { index = "https://download.pytorch.org/whl/rocm6.3", spec = "torch==2.6.0" },
+]
+
+[torch.cuda]
+index = "https://download.pytorch.org/whl/cu128"
+spec = "torch==2.9.1"
+alternatives = [
+  { index = "https://download.pytorch.org/whl/cu130", spec = "torch==2.9.1" },
+]
+
+[torch.cpu]
+index = "https://download.pytorch.org/whl/cpu"
+spec = "torch==2.9.1"
+alternatives = []
+
+[checkpoints]
+# HuggingFace dataset holding pretrained Piper checkpoints for fine-tuning.
+repo = "rhasspy/piper-checkpoints"
+api = "https://huggingface.co/api/datasets/rhasspy/piper-checkpoints"
+resolve = "https://huggingface.co/datasets/rhasspy/piper-checkpoints/resolve/main"
+
+[disk]
+# Rough floors, in GiB. ROCm torch unpacks to ~3-4 GB, one checkpoint is
+# ~0.9 GB, and a run keeps top-5 by val_mel plus top-5 by val_mos plus last.
+setup_free_gib = 20
+run_free_gib = 15

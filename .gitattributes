@@ -1,2 +1,20 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# This repo is authored on Windows and runs on Linux. The shell entry points
+# must be LF whatever the local autocrlf setting is, or the shebang line breaks
+# with "bad interpreter: /bin/sh^M" after cloning.
+run             text eol=lf
+setup           text eol=lf
+*.sh            text eol=lf
+*.py            text eol=lf
+*.yaml          text eol=lf
+*.toml          text eol=lf
+*.csv           text eol=lf
+
+# Binary-ish artefacts that must never be normalized.
+*.onnx          binary
+*.ckpt          binary
+*.pt            binary
+*.wav           binary
+*.f32           binary
