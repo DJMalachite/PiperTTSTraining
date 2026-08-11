@@ -41,20 +41,14 @@ else
 fi
 
 head_ "Packages"
-# ROCm development stack, a toolchain, and an interpreter that is not Fedora's
-# default: numba (which openai-whisper needs) lags new CPython releases, and
-# pins.toml's [python].prefer already puts 3.13 first for the same reason.
-packages="rocm-hip-devel rocblas-devel hipblas-devel rocm-cmake rocm-comgr-devel \
-miopen-hip-devel rocminfo rocm-smi \
-gcc gcc-c++ make cmake ninja-build git patch which \
-$python $python-devel python3-devel python3-pip \
-python3-pyyaml python3-msgpack python3-joblib \
-ffmpeg-free zstd xz findutils"
-
-# shellcheck disable=SC2086
-runcmd distrobox enter "$name" -- sudo dnf install -y $packages ||
+# The list, and the decision about what is required versus merely wanted, lives
+# in packages.sh because it has to run inside the box. It probes the repos
+# first: Fedora renames ROCm packages between releases, and one bad name in a
+# single dnf line takes the other twenty with it.
+runcmd distrobox enter "$name" -- \
+    sh "$BC250_REPO/scripts/bc250/packages.sh" "$python" ||
     refuse "package installation failed inside '$name'" \
-        "Run 'distrobox enter $name' and install them by hand; the list is above."
+        "The missing package is named above. Run 'distrobox enter $name' to look around."
 
 head_ "Verifying the GPU is visible in the container"
 if [ "$BC250_DRY_RUN" = "1" ]; then
