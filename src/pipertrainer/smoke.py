@@ -421,7 +421,11 @@ def _gradient_clip_check(results: Results, prepared) -> None:
     result = proc.capture(
         argv,
         cwd=REPO_ROOT,
-        env=env_mod.training_env(prepared.profile.runtime.env, offline=True),
+        env=env_mod.training_env(
+            prepared.profile.runtime.env,
+            offline=True,
+            hardware_name=prepared.profile.runtime.hardware,
+        ),
         timeout=1800,
     )
     if result.ok:

@@ -336,6 +336,13 @@ runtime:
   # torch. (one of: , rocm, cuda, cpu)
   vendor: ""
 
+  # Hardware profile. 'generic' suits every officially supported GPU. 'bc250'
+  # adds what the AMD BC-250 (gfx1013) needs: HSA_ENABLE_SDMA=0, conservative
+  # memory settings, and checks for the kernel and amdgpu module parameters
+  # that board requires. 'auto' picks from the detected GPU. See
+  # docs/BC250.md. (one of: auto, generic, bc250)
+  hardware: auto
+
   # No network calls: no checkpoint downloads, HF_HUB_OFFLINE=1, and
   # mos_metric forced to 'none' to skip a torch.hub timeout.
   offline: false
@@ -344,8 +351,9 @@ runtime:
   # automatically when a detected GPU has 16 GB or less.
   low_vram: false
 
-  # Extra environment variables for training, e.g. HSA_OVERRIDE_GFX_VERSION
-  # for a gfx1013 board like the BC-250.
+  # Extra environment variables for training and inference. The hardware
+  # profile fills in what your board needs; anything you add here wins over
+  # it.
   env: {}
 
 # ONNX export and the inference defaults baked into the config.

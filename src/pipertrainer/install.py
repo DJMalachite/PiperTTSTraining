@@ -661,8 +661,8 @@ def step_verify(ctx: Context) -> None:
         detail = info.matmul_error or info.error or "no GPU visible"
         ctx.warn(
             f"torch cannot use the GPU: {detail}. Training will fall back to "
-            f"CPU, which is far slower. See docs/GPU_SETUP.md — for a gfx1013 "
-            f"board try a different ROCm index from pins.toml with "
+            f"CPU, which is far slower. See docs/GPU_SETUP.md — try another "
+            f"ROCm index from pins.toml with "
             f"'./run setup --force-step torch --torch-index ...'."
         )
     elif info.usable_gpu:
@@ -670,9 +670,56 @@ def step_verify(ctx: Context) -> None:
             f"GPU verified with a real matmul: {info.device_name} "
             f"({info.total_memory_gib:.1f} GiB)"
         )
+        _verify_training(ctx, info)
 
     if failures:
         raise SetupError("verification failed for: " + ", ".join(failures))
+
+
+def _verify_training(ctx: Context, info: env_mod.TorchInfo) -> None:
+    """Prove the GPU can train, not merely multiply.
+
+    A matmul exercises rocBLAS and nothing else. The failure that matters here
+    is a missing elementwise or convolution kernel, or a fault after tens of
+    allocate/free cycles — neither of which a matmul can reach. Better to spend
+    ten seconds now than to find out an hour into a run.
+    """
+    from . import hardware as hardware_mod
+
+    hardware = hardware_mod.detect(info.gcn_arch)
+    if not hardware.is_generic:
+        tui.info("")
+        tui.info(f"hardware profile: {hardware.title}")
+        for line in hardware_mod.summarise(hardware)[1:]:
+            tui.hint(f"  {line}")
+
+    tui.info("  running a real autograd loop to check training works...")
+    probe = env_mod.probe_training(
+        extra_env=env_mod.training_env(hardware_name=hardware.name)
+    )
+    if probe.ok:
+        tui.ok(f"training verified: {probe.verdict}")
+        return
+
+    ctx.warn(f"this GPU cannot complete a training step: {probe.verdict}")
+    if hardware.training == hardware_mod.BLOCKED:
+        tui.info("")
+        for caveat in hardware.caveats:
+            tui.warn(tui.wrap(caveat, indent="  ").lstrip())
+        if hardware.reference:
+            tui.hint(f"  source: {hardware.reference}")
+        tui.info("")
+        tui.info(
+            "Everything except GPU training still works on this machine: "
+            "dataset preparation, export, and CPU training. See docs/BC250.md "
+            "for the options."
+        )
+    else:
+        tui.info(
+            "The GPU does arithmetic but cannot train, which usually means the "
+            "torch build has no kernels for this architecture. Try another "
+            "index from pins.toml — see docs/GPU_SETUP.md."
+        )
 
 
 # --------------------------------------------------------------------------

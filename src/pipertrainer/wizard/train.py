@@ -114,12 +114,62 @@ def run(
 
 def _hardware(prof: profile_mod.Profile, split) -> None:
     """Offer hardware-derived defaults, stating the assumptions out loud."""
+    from .. import hardware as hardware_mod
+
     info = env_mod.SetupState.load().info
     if not info.ok:
         info = env_mod.verify_torch()
 
     tui.heading("Hardware")
     tui.info(f"  {info.summary()}")
+
+    hw = hardware_mod.resolve(prof.runtime.hardware, info.gcn_arch)
+    if not hw.is_generic:
+        tui.info("")
+        tui.info(f"  hardware profile: {tui.style(hw.name, 'bold')} — {hw.title}")
+        if prof.runtime.hardware == "auto":
+            tui.hint("  detected from the GPU; set runtime.hardware to pin it")
+
+        changed = hardware_mod.apply(hw, prof)
+        for line in changed:
+            tui.bullet(line)
+
+        if hw.training == hardware_mod.BLOCKED:
+            tui.info("")
+            tui.error("GPU training is documented as blocked on this hardware.")
+            for caveat in hw.caveats[:2]:
+                tui.warn(tui.wrap(caveat, indent="    ").lstrip())
+            tui.hint(f"  source: {hw.reference}")
+            tui.info("")
+            tui.info("Measuring it on your board rather than assuming:")
+            probe = env_mod.probe_training(
+                extra_env=env_mod.training_env(hardware_name=hw.name)
+            )
+            if probe.ok:
+                tui.ok(
+                    f"your board disagrees with the documentation: "
+                    f"{probe.verdict}. Proceeding on GPU."
+                )
+            else:
+                tui.error(f"confirmed: {probe.verdict}")
+                tui.info("")
+                tui.info("Your options, in order of least effort:")
+                tui.bullet(
+                    "train on CPU here (slow, but everything else works) — "
+                    "set trainer.accelerator to cpu"
+                )
+                tui.bullet(
+                    "prepare the dataset here and train on another machine: "
+                    "copy data/<voice>/ across and run './run train' there"
+                )
+                tui.bullet(
+                    "build torch from source for gfx1013 — untried by anyone "
+                    "as far as the research goes"
+                )
+                tui.info("")
+                if tui.confirm("switch to CPU training now?", default=True):
+                    prof.trainer.accelerator = "cpu"
+                    return
 
     if not info.usable_gpu:
         tui.warn(

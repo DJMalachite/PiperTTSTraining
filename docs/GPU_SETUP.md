@@ -61,25 +61,48 @@ Run it any time:
 ./run doctor
 ```
 
-## The BC-250 (gfx1013)
+## Verification is a real training step, not just a matmul
 
-The BC-250 is an AMD RDNA2 board that reports as `gfx1013`, which no official
-ROCm build ships code objects for. The standard workaround is to tell the runtime
-to pretend it is a gfx1030:
+A matmul exercises rocBLAS and nothing else. The failure that actually stops a
+run is a missing elementwise or convolution kernel — `invalid device function` —
+or a fault after tens of allocate/free cycles. Neither is reachable by a matmul.
 
-```
-HSA_OVERRIDE_GFX_VERSION=10.3.0
-```
+So `./run setup` and `./run doctor` also run a **real autograd loop**: a small
+model built from the layer types a VITS vocoder uses (`Conv1d`,
+`ConvTranspose1d`, LeakyReLU, elementwise arithmetic), 60 optimizer steps,
+allocating fresh tensors every iteration. Ten seconds now beats an hour into a
+run.
 
-You do not have to set this by hand. When the probe sees a `gfx1013` device — or
-any `gfx10xx` absent from `get_arch_list()` — it retries with the override, and
-if that works it persists it to `.state/env.sh` (sourced by `./run` on every
-invocation) and records it in the profile's `runtime.env`.
+## The BC-250 (gfx1013) — see docs/BC250.md
 
-**Treat this as likely rather than certain.** If the override does not help, the
-CPU path stays fully functional, and the next thing to try is a different ROCm
-build. ROCm 7.x has been progressively dropping gfx10 targets, which is exactly
-why the default is 6.4 rather than the newest:
+The BC-250 needs enough special handling that it has [its own
+document](BC250.md). The short version:
+
+- **`HSA_OVERRIDE_GFX_VERSION` is a dead end on this board**, despite being the
+  most common advice. gfx1010 and gfx1013 share an ISA, but the memory-aperture
+  layout differs, so anything touching scratch or private addressing raises
+  `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`. The tool refuses to set it.
+- Compute needs kernel 7.1.5+, a patched amdgpu module with
+  `amdgpu.bc250_cc_write_mode=3` and `amdgpu.bc250_flush_by_runlist=1`,
+  `HSA_ENABLE_SDMA=0`, and `amdgpu.sched_policy` left at its default.
+- **Full training is reported as blocked** by missing gfx1013 elementwise
+  kernels in the stock wheel. Dataset preparation, export and CPU training all
+  work.
+
+Set `runtime.hardware: bc250` (or leave it at `auto`) to get the environment,
+the conservative settings, and the extra checks.
+
+## Overrides for boards where they do work
+
+`HSA_OVERRIDE_GFX_VERSION` genuinely rescues several unsupported targets, and the
+probe applies it automatically for those: gfx1011 and gfx1012 present as gfx1010
+(`10.1.0`), and gfx1031 through gfx1036 present as gfx1030 (`10.3.0`). When the
+retry succeeds it is persisted to `.state/env.sh` (sourced by `./run`) and
+recorded in the profile's `runtime.env`.
+
+If no override helps, the CPU path stays fully functional and the next thing to
+try is a different ROCm build. ROCm 7.x has been progressively dropping gfx10
+targets, which is exactly why the default is 6.4 rather than the newest:
 
 ```bash
 ./run setup --force-step torch --force-step constraint --torch-index https://download.pytorch.org/whl/rocm6.3 --torch-spec torch==2.6.0

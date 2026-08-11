@@ -8,9 +8,15 @@ it, writes a Piper-format dataset, reports what looks wrong, then configures and
 runs training — with every setting available in a terminal wizard and saved to a
 YAML profile you can edit and re-run.
 
-The reference target is a **BC-250 running CachyOS** (an AMD RDNA2 board that
-reports as `gfx1013`), but nothing here is specific to it: CUDA, ROCm and CPU are
-all first-class, and the GPU vendor is detected and verified during setup.
+The core is generic — CUDA, ROCm and CPU are all first-class, and the GPU is
+detected and verified during setup. Hardware that needs special handling gets an
+opt-in profile on top; `bc250` is the one that ships.
+
+> **BC-250 owners, read [docs/BC250.md](docs/BC250.md) first.** Published
+> research on that board reports **full GPU training as blocked** — the stock
+> ROCm wheel has no gfx1013 elementwise kernels, so autograd raises `invalid
+> device function`. Dataset preparation, export and CPU training all work, and
+> `./run doctor` measures your specific board rather than taking that on faith.
 
 ## Quickstart
 
@@ -93,7 +99,8 @@ the file.
 | | |
 | --- | --- |
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | The six commands, no theory |
-| [docs/GPU_SETUP.md](docs/GPU_SETUP.md) | NVIDIA / AMD / CPU, and the BC-250 specifically |
+| [docs/GPU_SETUP.md](docs/GPU_SETUP.md) | NVIDIA / AMD / CPU, and how the GPU is verified |
+| [docs/BC250.md](docs/BC250.md) | The AMD BC-250 (gfx1013): what works, what does not, and why |
 | [docs/DATASET.md](docs/DATASET.md) | What good source audio is; every dataset setting |
 | [docs/TRAINING.md](docs/TRAINING.md) | Profile → piper flag mapping; presets; fine-tuning |
 | [docs/EXPORT.md](docs/EXPORT.md) | The two-file voice format and how to use it |

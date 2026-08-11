@@ -8,9 +8,18 @@ A terminal tool that takes **one long audio recording** to a trained, exported
 [Piper](https://github.com/OHF-Voice/piper1-gpl) TTS voice. It wraps upstream
 piper1-gpl; it does not reimplement any of it.
 
-Reference hardware is a BC-250 (AMD RDNA2, reports as `gfx1013`) on CachyOS, but
-the tool is **vendor-neutral**: CUDA, ROCm and CPU are all first-class. Do not
-reintroduce AMD-only assumptions.
+The core is **vendor-neutral**: CUDA, ROCm and CPU are all first-class. Do not
+reintroduce AMD-only assumptions into it. Hardware needing special handling gets
+an opt-in profile in `hardware.py` instead (`runtime.hardware`); `bc250` is the
+one that ships.
+
+**On the BC-250 specifically:** published research reports full GPU training as
+blocked (no gfx1013 elementwise kernels in the stock wheel → `invalid device
+function`). `HSA_OVERRIDE_GFX_VERSION` is a *dead end* there, not a fix — the
+memory-aperture layout differs and it raises
+`HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`. `hardware.BC250.banned_env` records
+this and there is a regression test; do not "helpfully" re-add it. See
+`docs/BC250.md`.
 
 ## Commands
 
@@ -53,7 +62,8 @@ bootstrap.
 | `profile.py` | **The schema.** One dataclass tree; every field carries a `Spec` (help/choices/bounds). The wizard renders prompts from it and the YAML writer emits the help as comments, so they cannot drift. Adding a setting means adding one field. |
 | `train/argmap.py` | **Highest-risk module.** Pure function: profile → `lightning.yaml` + equivalent argv. Owns the link-argument table, the forbidden/blocked key lists, and every pre-launch invariant. No I/O, heavily tested. |
 | `train/presets.py` | `medium`/`high`/`low` as explicit `model.*` dicts. Quality is *our* abstraction — upstream has no `--quality` flag. |
-| `env.py` | Vendor detection and torch verification, including a real matmul (see below) and the `HSA_OVERRIDE_GFX_VERSION` retry. |
+| `env.py` | Vendor detection and torch verification: a real matmul *and* a real autograd loop (`probe_training`), plus the `HSA_OVERRIDE_GFX_VERSION` retry for targets it actually helps. |
+| `hardware.py` | Named hardware profiles (`generic`, `bc250`): environment, forced settings, banned variables, and system checks. Keeps board quirks out of the vendor logic. |
 | `install.py` | Ordered, idempotent, resumable setup state machine. Order is load-bearing. |
 | `train/launch.py` | Preflight (dataset facts, checkpoint architecture, espeak, cache) → `--print_config` gate → run, with a reproducibility snapshot per run. |
 | `dataset/segment.py` | Groups Whisper *words* into utterances honouring min/target/max. The core dataset-quality logic. |
@@ -92,7 +102,10 @@ Read `docs/UPSTREAM_NOTES.md` before touching `train/argmap.py`. The short versi
   too.
 - **`torch.cuda.is_available()` lies on ROCm** for unsupported architectures; the
   process aborts at the first kernel. Always verify with a real matmul plus
-  `synchronize()`, and treat "the probe printed nothing" as failure.
+  `synchronize()`, and treat "the probe printed nothing" as failure. A matmul is
+  still not proof of *training*: missing elementwise/conv kernels and
+  allocation-churn faults only show up under autograd, which is what
+  `env.probe_training` exists for.
 - **`openai-whisper` will replace a ROCm torch** — its metadata wants an unpinned
   torch plus CUDA-flavoured triton. Install `--no-deps` under `PIP_CONSTRAINT`,
   and install the vendor torch wheel *before* `piper1-gpl[train]`.

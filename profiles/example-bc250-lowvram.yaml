@@ -227,7 +227,7 @@ data:
   # Utterances per step. The single biggest lever on GPU memory. Must not
   # exceed the training split size or the loader yields zero batches. (range:
   # 1..)
-  batch_size: 8
+  batch_size: 4
 
   # Fraction of clips held back for validation. (range: 0.0..0.5)
   validation_split: 0.1
@@ -239,7 +239,7 @@ data:
   # prefetch_factor=4 whenever this is above 0, so each worker costs real RAM
   # — which an APU shares with the GPU. 0 is the smallest footprint. (range:
   # 0..16)
-  num_workers: 2
+  num_workers: 1
 
   # Let piper trim leading/trailing silence with Silero VAD during caching.
   # Shorter clips mean less padding and less memory.
@@ -336,6 +336,13 @@ runtime:
   # torch. (one of: , rocm, cuda, cpu)
   vendor: rocm
 
+  # Hardware profile. 'generic' suits every officially supported GPU. 'bc250'
+  # adds what the AMD BC-250 (gfx1013) needs: HSA_ENABLE_SDMA=0, conservative
+  # memory settings, and checks for the kernel and amdgpu module parameters
+  # that board requires. 'auto' picks from the detected GPU. See
+  # docs/BC250.md. (one of: auto, generic, bc250)
+  hardware: bc250
+
   # No network calls: no checkpoint downloads, HF_HUB_OFFLINE=1, and
   # mos_metric forced to 'none' to skip a torch.hub timeout.
   offline: false
@@ -344,11 +351,11 @@ runtime:
   # automatically when a detected GPU has 16 GB or less.
   low_vram: true
 
-  # Extra environment variables for training, e.g. HSA_OVERRIDE_GFX_VERSION
-  # for a gfx1013 board like the BC-250.
+  # Extra environment variables for training and inference. The hardware
+  # profile fills in what your board needs; anything you add here wins over
+  # it.
   env:
-    HSA_OVERRIDE_GFX_VERSION: "10.3.0"
-    PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True"
+    HSA_ENABLE_SDMA: "0"
 
 # ONNX export and the inference defaults baked into the config.
 export:

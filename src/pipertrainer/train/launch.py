@@ -349,6 +349,7 @@ def print_config_gate(prepared: Prepared) -> None:
         env=env_mod.training_env(
             prepared.profile.runtime.env,
             offline=prepared.profile.runtime.offline,
+            hardware_name=prepared.profile.runtime.hardware,
         ),
         timeout=900,
     )
@@ -439,6 +440,7 @@ def start(
         prof.runtime.env,
         offline=prof.runtime.offline,
         num_workers=int(prof.data.num_workers),
+        hardware_name=prof.runtime.hardware,
     )
     run_dir = record_run(prepared, argv, env)
     log_path = run_dir / "train.log"

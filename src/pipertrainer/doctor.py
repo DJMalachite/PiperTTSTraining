@@ -352,6 +352,8 @@ def run(offline: bool = False) -> int:
                     f"ladder in docs/TROUBLESHOOTING.md",
                 )
 
+    _hardware_section(report, info, state)
+
     tui.heading("Profiles")
     names = profile_mod.profile_names()
     if not names:
@@ -384,6 +386,85 @@ def run(offline: bool = False) -> int:
         report.add(OK, "mode", "offline — network checks skipped")
 
     return _finish(report)
+
+
+def _torch_lib_dirs() -> list[Path]:
+    """Where an installed torch keeps its bundled libraries."""
+    result = env_mod.python_snippet(
+        "import os, torch; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))"
+    )
+    if not result.ok or not result.lines:
+        return []
+    return [Path(result.lines[-1].strip())]
+
+
+def _hardware_section(report: Report, info: env_mod.TorchInfo, state) -> None:
+    """Hardware-specific checks, and the one that actually predicts training."""
+    from . import hardware as hardware_mod
+
+    configured = "auto"
+    active = profile_mod.get_active()
+    if active:
+        try:
+            prof, _ = profile_mod.load_by_name(active)
+            configured = prof.runtime.hardware
+        except profile_mod.ProfileError:
+            pass
+
+    hw = hardware_mod.resolve(configured, info.gcn_arch)
+    tui.heading(f"Hardware profile: {hw.name}")
+    tui.info(f"  {hw.title}")
+    for line in hardware_mod.summarise(hw)[1:]:
+        tui.hint(f"  {line}")
+
+    for check in hardware_mod.checks_for(hw, _torch_lib_dirs()):
+        status = {
+            hardware_mod.OK: OK,
+            hardware_mod.WARN: WARN,
+            hardware_mod.FAIL: FAIL,
+            hardware_mod.INFO: SKIP,
+        }[check.status]
+        report.add(status, check.name, check.detail, check.fix)
+
+    if hw.caveats:
+        tui.info("")
+        for caveat in hw.caveats:
+            tui.warn(tui.wrap(caveat, indent="  ").lstrip())
+        if hw.reference:
+            tui.hint(f"  source: {hw.reference}")
+
+    # The measurement that matters. A matmul proves arithmetic; only an
+    # autograd loop with allocation churn proves training.
+    if not info.usable_gpu:
+        report.add(SKIP, "training probe", "no usable GPU to test")
+        return
+
+    tui.info("")
+    tui.info("  running a real autograd loop (this takes a few seconds)...")
+    probe = env_mod.probe_training(
+        extra_env=env_mod.training_env(hardware_name=configured)
+    )
+    if probe.ok:
+        report.add(
+            OK, "training probe", probe.verdict
+        )
+    else:
+        expected = hw.training == hardware_mod.BLOCKED
+        report.add(
+            WARN if expected else FAIL,
+            "training probe",
+            probe.verdict,
+            (
+                "This matches what is documented for this board, so it is a "
+                "confirmation rather than a surprise. Train on CPU, or on "
+                "another machine, and use this one for dataset preparation. "
+                f"See docs/BC250.md and {hw.reference}."
+                if expected
+                else "The GPU can do arithmetic but cannot complete a training "
+                "step. Usually this means the torch build has no kernels for "
+                "this architecture. See docs/GPU_SETUP.md."
+            ),
+        )
 
 
 def _import_fix(name: str) -> str:

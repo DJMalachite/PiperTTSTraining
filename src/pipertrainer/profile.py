@@ -31,6 +31,10 @@ from .paths import ACTIVE_PROFILE, PROFILES_DIR, profile_path, slug
 
 SCHEMA_VERSION = 1
 
+#: Kept in sync with ``hardware.NAMES``; duplicated as a literal so that
+#: importing the schema never pulls in the hardware-probing machinery.
+HARDWARE_NAMES = ("auto", "generic", "bc250")
+
 QUALITIES = ("medium", "high", "low")
 STRATEGIES = ("align", "vad")
 VENDORS = ("rocm", "cuda", "cpu")
@@ -629,6 +633,16 @@ class RuntimeCfg:
         kind="choice",
         choices=("",) + VENDORS,
     )
+    hardware: str = spec(
+        "auto",
+        "Hardware profile. 'generic' suits every officially supported GPU. "
+        "'bc250' adds what the AMD BC-250 (gfx1013) needs: HSA_ENABLE_SDMA=0, "
+        "conservative memory settings, and checks for the kernel and amdgpu "
+        "module parameters that board requires. 'auto' picks from the detected "
+        "GPU. See docs/BC250.md.",
+        kind="choice",
+        choices=HARDWARE_NAMES,
+    )
     offline: bool = spec(
         False,
         "No network calls: no checkpoint downloads, HF_HUB_OFFLINE=1, and "
@@ -643,8 +657,9 @@ class RuntimeCfg:
     )
     env: dict[str, str] = spec_factory(
         dict,
-        "Extra environment variables for training, e.g. "
-        "HSA_OVERRIDE_GFX_VERSION for a gfx1013 board like the BC-250.",
+        "Extra environment variables for training and inference. The hardware "
+        "profile fills in what your board needs; anything you add here wins "
+        "over it.",
         kind="dict",
     )
 

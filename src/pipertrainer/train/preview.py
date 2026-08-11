@@ -92,7 +92,11 @@ def run(
     # with an optional `speaker_id` — not bare text.
     payload = "\n".join(json.dumps({"text": sentence}) for sentence in text) + "\n"
 
-    env = env_mod.training_env(prof.runtime.env, offline=offline or prof.runtime.offline)
+    env = env_mod.training_env(
+        prof.runtime.env,
+        offline=offline or prof.runtime.offline,
+        hardware_name=prof.runtime.hardware,
+    )
     result = _run_with_stdin(argv, payload, env, paths)
 
     if not result.ok:

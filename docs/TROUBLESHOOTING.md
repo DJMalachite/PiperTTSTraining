@@ -67,13 +67,28 @@ at the first real kernel launch — often `SIGABRT`, sometimes
 ./run doctor
 ```
 
-If the matmul check fails, see [GPU_SETUP.md](GPU_SETUP.md). For a `gfx1013`
-board the fix is usually `HSA_OVERRIDE_GFX_VERSION=10.3.0` (applied automatically
-when detected); otherwise try a different ROCm build:
+If the matmul check fails, see [GPU_SETUP.md](GPU_SETUP.md). On a **BC-250
+(gfx1013)** do not reach for `HSA_OVERRIDE_GFX_VERSION` — it makes things worse
+on that board; see [BC250.md](BC250.md). Otherwise try a different ROCm build:
 
 ```bash
 ./run setup --force-step torch --force-step constraint --torch-index https://download.pytorch.org/whl/rocm6.3 --torch-spec torch==2.6.0
 ```
+
+## "invalid device function", or a fault after 20–40 iterations
+
+The GPU passes the matmul check and then fails once training starts. This means
+the torch build has no compiled kernels for your GPU architecture — matmul goes
+through rocBLAS, but the elementwise and convolution kernels autograd needs are
+missing.
+
+`./run doctor` reproduces this deliberately with a 60-step autograd loop, so you
+can confirm it in ten seconds rather than an hour.
+
+On a BC-250 this is the documented state of the board and is reported as a
+warning rather than an error; see [BC250.md](BC250.md) for the options
+(prepare the dataset there and train elsewhere, or train on CPU). On any other
+GPU, try a different ROCm index — see [GPU_SETUP.md](GPU_SETUP.md).
 
 ## The GPU worked, and now it does not
 

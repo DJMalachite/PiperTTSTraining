@@ -5,12 +5,23 @@ vendor-agnostic — it never mentions ROCm — so the only thing that decides wh
 hardware trains is *which torch wheel is installed*. Everything here exists to
 get that decision right and then prove it.
 
-The proof matters more than it looks. On ROCm, ``torch.cuda.is_available()``
-returns True for unsupported GPU architectures, and the process then aborts at
-the first real kernel launch. So the probe always runs an actual matmul and
-synchronises. For a gfx1013 board like the BC-250 — a target no official ROCm
-build ships code objects for — we retry with ``HSA_OVERRIDE_GFX_VERSION=10.3.0``
-and persist that if it works.
+The proof matters more than it looks, and comes in two parts.
+
+On ROCm, ``torch.cuda.is_available()`` returns True for GPU architectures the
+build has no kernels for, and the process then aborts at the first real kernel
+launch. So ``probe_torch`` runs an actual matmul and synchronises, and treats a
+probe that printed nothing as a failure rather than a success.
+
+A matmul is still not proof that the GPU can *train*. It exercises rocBLAS and
+nothing else, while the failures that stop a run are missing elementwise or
+convolution kernels (``invalid device function``) and faults after tens of
+allocate/free cycles. ``probe_training`` therefore runs a real autograd loop
+with allocation churn, using the layer types a VITS vocoder actually uses.
+
+``HSA_OVERRIDE_GFX_VERSION`` is applied automatically only for targets it
+genuinely rescues — see ``GFX_OVERRIDES``. Boards where it is known to make
+things worse declare it in ``hardware.HardwareProfile.banned_env``, and it is
+never suggested for those.
 """
 
 from __future__ import annotations
@@ -28,16 +39,20 @@ from .paths import ENV_SH, SETUP_STATE, STATE_DIR, TORCH_CONSTRAINT, venv_python
 
 VENDORS = ("rocm", "cuda", "cpu")
 
-# gfx targets that need an override to run on ROCm builds that ship gfx1030
-# kernels. gfx1013 is the BC-250 / Oberon Plus; the others are common RDNA1/2
-# consumer parts in the same position.
+# gfx targets that an override genuinely rescues, mapped to the ISA whose
+# kernels actually cover them. RDNA1 parts borrow gfx1010's, RDNA2 parts
+# gfx1030's.
+#
+# gfx1013 (BC-250, Cyan Skillfish) is deliberately ABSENT. It shares an ISA
+# with gfx1010, which makes the override tempting, but the memory-aperture
+# layout differs: anything using scratch or private addressing then raises
+# HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION. See hardware.BC250.banned_env.
 GFX_OVERRIDES = {
-    "gfx1013": "10.3.0",
-    "gfx1010": "10.3.0",
-    "gfx1011": "10.3.0",
-    "gfx1012": "10.3.0",
+    "gfx1011": "10.1.0",
+    "gfx1012": "10.1.0",
     "gfx1031": "10.3.0",
     "gfx1032": "10.3.0",
+    "gfx1033": "10.3.0",
     "gfx1034": "10.3.0",
     "gfx1035": "10.3.0",
     "gfx1036": "10.3.0",
@@ -358,15 +373,24 @@ def needs_gfx_override(info: TorchInfo) -> str | None:
     """Suggested HSA_OVERRIDE_GFX_VERSION, or None if it would not help."""
     if not info.hip or not info.available:
         return None
+    from . import hardware
+
     arch = (info.gcn_arch or "").split(":")[0]
+
+    # Some boards are known to be made *worse* by an override. Never suggest
+    # one for those, however tempting the ISA similarity looks.
+    profile = hardware.detect(arch)
+    if "HSA_OVERRIDE_GFX_VERSION" in profile.banned_env:
+        return None
+
     if arch in GFX_OVERRIDES:
         return GFX_OVERRIDES[arch]
     if arch and info.arch_list and arch not in [
         a.split(":")[0] for a in info.arch_list
     ]:
-        # Unlisted gfx10xx targets are usually rescued by pretending to be
-        # gfx1030; anything else is a guess we should not make.
-        return "10.3.0" if arch.startswith("gfx10") else None
+        # An unlisted RDNA2 target is usually rescued by presenting as gfx1030.
+        # Anything else is a guess we should not make on the user's behalf.
+        return "10.3.0" if arch.startswith("gfx103") else None
     return None
 
 
@@ -377,10 +401,12 @@ def verify_torch(python: Path | None = None) -> TorchInfo:
         return info
 
     override = needs_gfx_override(info)
-    if override is None and info.aborted:
-        # Aborted before we could read gcnArchName; the override is still the
-        # single most likely fix on a ROCm box, so try it blind.
-        override = "10.3.0" if SetupState.load().vendor == "rocm" else None
+    if override is None and info.aborted and SetupState.load().vendor == "rocm":
+        # The probe died before it could report gcnArchName, so we cannot ask
+        # the hardware profile whether an override is appropriate. Try gfx1030
+        # blind — it is the single most likely rescue on an unlisted RDNA2 part
+        # — but never persist it unless the retry genuinely succeeds.
+        override = "10.3.0"
     if override is None:
         return info
 
@@ -389,6 +415,144 @@ def verify_torch(python: Path | None = None) -> TorchInfo:
         retry.hsa_override = override
         return retry
     return info if info.ok else retry
+
+
+# A matmul proves the GPU can multiply. It does not prove it can *train*: the
+# failure mode on an unsupported target is usually a missing elementwise or
+# convolution kernel ("invalid device function"), or a fault after tens of
+# allocate/free cycles. Both appear only under a real autograd loop, so this
+# probe runs one — deliberately with a fresh allocation every iteration, and
+# with the layer types a VITS vocoder actually uses.
+_TRAIN_PROBE = r"""
+import json, sys
+info = {"stage": "import", "iterations": 0}
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    info["torch"] = torch.__version__
+    if not torch.cuda.is_available():
+        info["error"] = "no GPU visible"
+        print(json.dumps(info)); raise SystemExit(0)
+
+    wanted = int(sys.argv[1]) if len(sys.argv) > 1 else 60
+    torch.manual_seed(0)
+
+    info["stage"] = "build"
+    model = nn.Sequential(
+        nn.Conv1d(32, 64, 5, padding=2),
+        nn.LeakyReLU(0.1),
+        nn.ConvTranspose1d(64, 32, 4, stride=2, padding=1),
+        nn.LeakyReLU(0.1),
+        nn.Conv1d(32, 16, 3, padding=1),
+    ).cuda()
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+    info["stage"] = "train"
+    for step in range(wanted):
+        # Fresh tensors each iteration on purpose: allocation churn is the
+        # documented failure mode on some boards.
+        x = torch.randn(4, 32, 256, device="cuda")
+        y = model(x)
+        target = torch.randn_like(y)
+        loss = F.l1_loss(y, target) + (y * y).mean() + torch.tanh(y).mean()
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+        value = float(loss.item())
+        if value != value:
+            info["error"] = "loss became NaN at iteration %d" % step
+            break
+        del x, y, target, loss
+        info["iterations"] = step + 1
+    torch.cuda.synchronize()
+    info["stage"] = "done"
+    info["ok"] = info["iterations"] == wanted and "error" not in info
+except Exception as exc:
+    info["error"] = "%s: %s" % (type(exc).__name__, exc)
+print(json.dumps(info))
+"""
+
+
+@dataclass
+class TrainingProbe:
+    """Can this GPU actually run a training step, not just a matmul?"""
+
+    ok: bool = False
+    iterations: int = 0
+    requested: int = 60
+    error: str | None = None
+    stage: str = ""
+    aborted: bool = False
+
+    @property
+    def verdict(self) -> str:
+        if self.ok:
+            return f"completed {self.iterations} autograd iterations"
+        if self.aborted:
+            return (
+                f"the process died after {self.iterations} iteration(s) — the "
+                f"GPU runtime aborted rather than raising"
+            )
+        if self.error and "invalid device function" in self.error.lower():
+            return (
+                f"missing GPU kernels: {self.error}. This build of torch has no "
+                f"kernels compiled for this architecture, which is exactly what "
+                f"blocks training while leaving simple matmuls working"
+            )
+        if self.iterations and self.error:
+            return (
+                f"failed after {self.iterations} of {self.requested} iterations: "
+                f"{self.error}"
+            )
+        return self.error or "failed for an unknown reason"
+
+
+def probe_training(
+    python: Path | None = None,
+    *,
+    iterations: int = 60,
+    extra_env: dict[str, str] | None = None,
+) -> TrainingProbe:
+    """Run a real autograd loop on the GPU and report how far it got."""
+    interpreter = python or venv_python()
+    if not Path(interpreter).exists():
+        return TrainingProbe(error=f"no interpreter at {interpreter}")
+
+    env = {"PYTHONNOUSERSITE": "1"}
+    env.update(extra_env or {})
+    result = proc.capture(
+        [interpreter, "-c", _TRAIN_PROBE, str(iterations)],
+        env=env,
+        timeout=900,
+    )
+
+    payload: dict[str, Any] | None = None
+    for line in reversed(result.lines):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            break
+
+    if payload is None:
+        tail = "; ".join(result.lines[-4:]) or "no output"
+        return TrainingProbe(
+            ok=False,
+            requested=iterations,
+            error=f"probe crashed (exit {result.returncode}): {tail}",
+            aborted=True,
+        )
+
+    return TrainingProbe(
+        ok=bool(payload.get("ok")),
+        iterations=int(payload.get("iterations") or 0),
+        requested=iterations,
+        error=payload.get("error"),
+        stage=str(payload.get("stage") or ""),
+    )
 
 
 def record_torch(state: SetupState, info: TorchInfo) -> SetupState:
@@ -451,18 +615,32 @@ def training_env(
     *,
     offline: bool = False,
     num_workers: int | None = None,
+    hardware_name: str = "auto",
 ) -> dict[str, str]:
-    """Environment for a training/inference subprocess."""
+    """Environment for a training/inference subprocess.
+
+    Layered, most general first: inferred defaults, then the hardware profile,
+    then whatever the user put in ``runtime.env``. The user always wins — but a
+    setting the hardware profile bans is never *inferred*, only ever set
+    deliberately.
+    """
+    from . import hardware as hardware_mod
+
     state = SetupState.load()
+    profile = hardware_mod.resolve(hardware_name, state.info.gcn_arch)
     env: dict[str, str] = {}
 
-    if state.hsa_override:
+    if state.hsa_override and "HSA_OVERRIDE_GFX_VERSION" not in profile.banned_env:
         env["HSA_OVERRIDE_GFX_VERSION"] = state.hsa_override
 
-    if state.info.hip:
+    if state.info.hip and profile.is_generic:
         # Biggest single anti-fragmentation win on a shared-memory APU, where
-        # the GPU and the desktop compete for the same physical RAM.
+        # the GPU and the desktop compete for the same physical RAM. Left to
+        # hardware profiles otherwise: on a board whose failure mode is
+        # allocation churn, remapping virtual segments is not obviously safe.
         env.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
+
+    env.update(profile.env)
 
     if offline:
         env["HF_HUB_OFFLINE"] = "1"
