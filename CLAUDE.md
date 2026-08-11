@@ -13,13 +13,18 @@ reintroduce AMD-only assumptions into it. Hardware needing special handling gets
 an opt-in profile in `hardware.py` instead (`runtime.hardware`); `bc250` is the
 one that ships.
 
-**On the BC-250 specifically:** published research reports full GPU training as
-blocked (no gfx1013 elementwise kernels in the stock wheel → `invalid device
-function`). `HSA_OVERRIDE_GFX_VERSION` is a *dead end* there, not a fix — the
-memory-aperture layout differs and it raises
-`HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`. `hardware.BC250.banned_env` records
-this and there is a regression test; do not "helpfully" re-add it. See
-`docs/BC250.md`.
+**On the BC-250 specifically:** GPU training is blocked *with a stock wheel*
+because torch's kernels are compiled ahead of time per gfx target and no
+published wheel lists `gfx1013` — hence `invalid device function` on every
+elementwise op while matmul keeps working, since GEMM comes from rocBLAS.
+`scripts/bc250/build.sh` builds a torch that does carry those kernels; whether
+that is sufficient is unproven, and `./run doctor`'s autograd probe is the
+verdict. Do not write either outcome up as settled.
+
+`HSA_OVERRIDE_GFX_VERSION` is a *dead end* there, not a fix — the memory-aperture
+layout differs and it raises `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`.
+`hardware.BC250.banned_env` records this and there is a regression test; do not
+"helpfully" re-add it. See `docs/BC250.md`.
 
 ## Commands
 
@@ -35,6 +40,17 @@ this and there is a regression test; do not "helpfully" re-add it. See
 ./run preview          # synthesize from a checkpoint via infer_torch
 ./run export           # ONNX + voice config, then verify by synthesizing
 ./run smoke            # end-to-end CPU self-test on synthetic audio
+```
+
+`PIPERTRAINER_ENV=<name>` selects `.venv-<name>` and `.state-<name>` instead of
+`.venv`/`.state`, so one clone can hold more than one installed environment.
+Unset — the normal case — keeps the historic layout exactly.
+
+BC-250 only, and never part of `./run setup`:
+
+```bash
+scripts/bc250/build.sh --list      # six stages: detect, kernel, container, rocblas, torch, install
+scripts/bc250/build.sh --dry-run   # print every command, change nothing
 ```
 
 Tests (stdlib `unittest`, no venv, no GPU, no audio, <1s):
@@ -69,9 +85,12 @@ bootstrap.
 | `dataset/segment.py` | Groups Whisper *words* into utterances honouring min/target/max. The core dataset-quality logic. |
 | `dataset/pipeline.py` | probe → decode → macrosplit → transcribe → segment → emit → report, with per-stage caching. |
 | `tui.py` | Line-based `input()` prompts. No curses — must work over SSH, in tmux, and with piped stdin. |
+| `scripts/bc250/` | One board's build path, in POSIX sh, out of the vendor-neutral core on purpose. Six idempotent stages; the upstream kernel patches are *fetched* at pinned SHAs, never vendored. |
 
 `pins.toml` is the single source of truth for the piper1-gpl tag+sha, the torch
-index/version per vendor, and the Whisper pin.
+index/version per vendor, the Whisper pin, and — under `[bc250]` — the commits of
+the third-party kernel patches that build reads. The shell scripts read it too,
+so they cannot disagree with the Python about what is being applied.
 
 ## Non-negotiables
 

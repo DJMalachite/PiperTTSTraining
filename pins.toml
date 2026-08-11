@@ -84,6 +84,43 @@ index = "https://download.pytorch.org/whl/cpu"
 spec = "torch==2.9.1"
 alternatives = []
 
+[bc250]
+# Inputs to scripts/bc250/build.sh, which builds a gfx1013 ROCm stack for the
+# AMD BC-250. Nothing here is touched by an ordinary './run setup' — see
+# docs/BC250.md before any of it makes sense.
+#
+# The kernel-side fixes come from two separate projects and are *fetched* at
+# these SHAs rather than vendored, so attribution stays where it belongs and
+# there is no copy here to drift out of date.
+reference_repo = "https://github.com/akandr/bc250-rocm"
+reference_sha = "1b7418e221259ed0631391481a958578d81a5f55"
+cu_unlock_repo = "https://github.com/duggasco/bc250-40cu-unlock"
+cu_unlock_sha = "ae7c30c78e253a5e2c6af0e9c090f807b825191c"
+
+# The build container. Fedora 43 is not incidental: it is the distribution the
+# reference work was done on and it packages ROCm 6.4 in its own repositories,
+# which is what lets build_rocblas_gfx1013.sh run against a system ROCm the way
+# its author intended. Changing this means adapting that script.
+container_image = "registry.fedoraproject.org/fedora-toolbox:43"
+container_name = "bc250"
+# Not Fedora 43's default python3.14: numba, which openai-whisper needs, lags
+# new CPython releases. Matches the head of [python].prefer.
+container_python = "python3.13"
+
+# torch, built from source with PYTORCH_ROCM_ARCH=gfx1013. The version matches
+# [torch.rocm] deliberately: keeping it identical means PIP_CONSTRAINT, the
+# constraint file and every existing version check stay coherent whether the
+# wheel came from download.pytorch.org or from this build.
+torch_repo = "https://github.com/pytorch/pytorch"
+torch_tag = "v2.9.1"
+# Appended as a local version, so the wheel is self-describing and the
+# constraint file records what it actually is: 2.9.1+rocm6.4.gfx1013.
+torch_local_version = "rocm6.4.gfx1013"
+
+gfx_target = "gfx1013"
+# Kernel source, rocBLAS, Tensile, a full pytorch tree and its build artefacts.
+build_free_gib = 60
+
 [checkpoints]
 # HuggingFace dataset holding pretrained Piper checkpoints for fine-tuning.
 repo = "rhasspy/piper-checkpoints"

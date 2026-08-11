@@ -317,18 +317,56 @@ def step_venv(ctx: Context) -> None:
 # --------------------------------------------------------------------------
 
 
+def local_wheel(spec: str) -> Path | None:
+    """A ``--torch-spec`` naming a wheel on disk, or None for a requirement.
+
+    Not every torch comes from an index. A board with no stock wheel — the
+    BC-250 and its gfx1013 build, see docs/BC250.md — produces one locally, and
+    pointing ``--torch-spec`` at it has to install *that file* rather than
+    resolve its name against a package index that has never heard of it.
+
+    Deliberately narrow: only an existing path ending in ``.whl``. Anything
+    else stays a requirement string, so ``torch==2.6.0`` cannot be mistaken for
+    a filename.
+    """
+    if not spec or not spec.endswith(".whl"):
+        return None
+    path = Path(spec).expanduser()
+    return path if path.is_file() else None
+
+
 def step_torch(ctx: Context) -> None:
     pin = ctx.pins.torch(ctx.vendor)
     index = ctx.torch_index or pin.index
     spec = ctx.torch_spec or pin.spec
 
-    tui.info(f"installing {spec} for {ctx.vendor} from {index}")
-    tui.hint(
-        "  --index-url replaces PyPI entirely for this step. That is what stops "
-        "a CUDA wheel being resolved on an AMD box; the PyTorch index mirrors "
-        "torch's own dependencies, so nothing is missing."
-    )
-    ctx.pip("install", "--index-url", index, spec)
+    wheel = local_wheel(spec)
+    if wheel is not None:
+        # No --index-url: there is no index involved, and torch's own
+        # dependencies (filelock, sympy, jinja2 ...) come from PyPI as usual.
+        tui.info(f"installing {wheel.name} for {ctx.vendor} from {wheel.parent}")
+        tui.hint(
+            "  a locally built wheel, so nothing is resolved against an index. "
+            "PIP_CONSTRAINT still pins whatever version it turns out to be for "
+            "every later step."
+        )
+        ctx.pip("install", str(wheel.resolve()))
+        index = "local wheel"
+        spec = str(wheel.resolve())
+    elif spec.endswith(".whl"):
+        raise SetupError(
+            f"--torch-spec looks like a wheel path, but there is no file at "
+            f"{spec!r}. Pass an existing .whl, or a requirement such as "
+            f"'torch==2.9.1'."
+        )
+    else:
+        tui.info(f"installing {spec} for {ctx.vendor} from {index}")
+        tui.hint(
+            "  --index-url replaces PyPI entirely for this step. That is what "
+            "stops a CUDA wheel being resolved on an AMD box; the PyTorch index "
+            "mirrors torch's own dependencies, so nothing is missing."
+        )
+        ctx.pip("install", "--index-url", index, spec)
 
     ctx.state.vendor = ctx.vendor
     ctx.state.torch_index = index

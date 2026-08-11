@@ -85,9 +85,12 @@ document](BC250.md). The short version:
 - Compute needs kernel 7.1.5+, a patched amdgpu module with
   `amdgpu.bc250_cc_write_mode=3` and `amdgpu.bc250_flush_by_runlist=1`,
   `HSA_ENABLE_SDMA=0`, and `amdgpu.sched_policy` left at its default.
-- **Full training is reported as blocked** by missing gfx1013 elementwise
-  kernels in the stock wheel. Dataset preparation, export and CPU training all
-  work.
+- **Full training is blocked with a stock wheel**, because torch's kernels are
+  compiled ahead of time per gfx target and no published wheel lists gfx1013.
+  Dataset preparation, export and CPU training all work regardless.
+- `scripts/bc250/build.sh` builds a torch that does carry gfx1013 kernels, in
+  six resumable stages. Whether that is enough is unproven; the autograd probe
+  in `./run doctor` is the verdict.
 
 Set `runtime.hardware: bc250` (or leave it at `auto`) to get the environment,
 the conservative settings, and the extra checks.

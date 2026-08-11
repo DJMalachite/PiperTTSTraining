@@ -12,11 +12,14 @@ The core is generic — CUDA, ROCm and CPU are all first-class, and the GPU is
 detected and verified during setup. Hardware that needs special handling gets an
 opt-in profile on top; `bc250` is the one that ships.
 
-> **BC-250 owners, read [docs/BC250.md](docs/BC250.md) first.** Published
-> research on that board reports **full GPU training as blocked** — the stock
-> ROCm wheel has no gfx1013 elementwise kernels, so autograd raises `invalid
-> device function`. Dataset preparation, export and CPU training all work, and
-> `./run doctor` measures your specific board rather than taking that on faith.
+> **BC-250 owners, read [docs/BC250.md](docs/BC250.md) first.** With a stock
+> ROCm wheel, **GPU training is blocked** on that board — torch's kernels are
+> compiled ahead of time per architecture and no published wheel includes
+> gfx1013, so autograd raises `invalid device function` while matmul keeps
+> working. Dataset preparation, export and CPU training all work regardless.
+> `scripts/bc250/build.sh` builds a torch that does carry those kernels; whether
+> that is sufficient is unproven, and `./run doctor` measures your specific board
+> rather than taking anything on faith.
 
 ## Quickstart
 
@@ -100,7 +103,7 @@ the file.
 | --- | --- |
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | The six commands, no theory |
 | [docs/GPU_SETUP.md](docs/GPU_SETUP.md) | NVIDIA / AMD / CPU, and how the GPU is verified |
-| [docs/BC250.md](docs/BC250.md) | The AMD BC-250 (gfx1013): what works, what does not, and why |
+| [docs/BC250.md](docs/BC250.md) | The AMD BC-250 (gfx1013): what works, what does not, why, and how to build a torch that might |
 | [docs/DATASET.md](docs/DATASET.md) | What good source audio is; every dataset setting |
 | [docs/TRAINING.md](docs/TRAINING.md) | Profile → piper flag mapping; presets; fine-tuning |
 | [docs/EXPORT.md](docs/EXPORT.md) | The two-file voice format and how to use it |

@@ -87,10 +87,20 @@ missing.
 `./run doctor` reproduces this deliberately with a 60-step autograd loop, so you
 can confirm it in ten seconds rather than an hour.
 
-On a BC-250 this is the documented state of the board and is reported as a
-warning rather than an error; see [BC250.md](BC250.md) for the options
-(prepare the dataset there and train elsewhere, or train on CPU). On any other
-GPU, try a different ROCm index — see [GPU_SETUP.md](GPU_SETUP.md).
+`./run doctor` also reports, separately from the probe, whether the installed
+torch was compiled for your device at all — that line names the cause directly:
+
+```
+[warn] torch gfx kernels   this torch has no gfx1013 code (built for gfx900, ..., gfx1201)
+```
+
+On a BC-250 with a stock wheel this is the documented state of the board and is
+reported as a warning rather than an error; see [BC250.md](BC250.md) for the
+options (prepare the dataset there and train elsewhere, train on CPU, or build a
+torch for gfx1013 with `scripts/bc250/build.sh`). If that build has already
+happened and the probe *still* fails, doctor escalates it to an error, because
+the documented cause has been ruled out. On any other GPU, try a different ROCm
+index — see [GPU_SETUP.md](GPU_SETUP.md).
 
 ## The GPU worked, and now it does not
 

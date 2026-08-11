@@ -57,6 +57,8 @@ class HardwareProfile:
     reference: str = ""
     #: Our own document for this board, if it has one.
     doc: str = ""
+    #: Script that builds what no stock wheel provides for this board.
+    build_script: str = ""
 
     @property
     def is_generic(self) -> bool:
@@ -88,6 +90,15 @@ BC250 = HardwareProfile(
         # The SDMA host-to-device path is broken for bulk transfers on this
         # board; disabling it is part of the documented working configuration.
         "HSA_ENABLE_SDMA": "0",
+        # hipBLASLt has no gfx1013 support at all, and torch reaches for it
+        # first for addmm/linear. Force the rocBLAS path, which is the one that
+        # can actually be built for this target.
+        "TORCH_BLAS_PREFER_HIPBLASLT": "0",
+        # MIOpen has no tuning entries for an architecture nobody supports, so
+        # the default search compiles and benchmarks every solver at runtime on
+        # first use — reported to hang outright on unsupported targets. FAST
+        # takes the first workable solver instead.
+        "MIOPEN_FIND_MODE": "FAST",
     },
     settings={
         # fp16 batch-GEMM crashes inside rocBLAS on this board, and mixed
@@ -114,20 +125,24 @@ BC250 = HardwareProfile(
     training=BLOCKED,
     reference=BC250_REFERENCE,
     doc="docs/BC250.md",
+    build_script="scripts/bc250/build.sh",
     caveats=(
-        "Full training is reported as blocked: the stock torch ROCm wheel ships "
-        "no gfx1013 elementwise kernels, so autograd raises 'invalid device "
-        "function'. Preallocated-buffer matmul reaches about 4.5 TFLOP/s, but "
-        "that is not the shape of a training loop.",
+        "Training is blocked with the stock torch ROCm wheel: it ships no "
+        "gfx1013 elementwise kernels, so autograd raises 'invalid device "
+        "function'. Preallocated-buffer matmul reaches about 4.5 TFLOP/s "
+        "regardless, because GEMM comes from rocBLAS — that is inference's "
+        "shape, not training's.",
         "Loops that allocate and free GPU tensors every iteration fault after "
-        "20 to 40 iterations even in the working configuration. Training does "
-        "exactly that.",
+        "20 to 40 iterations unless the amdgpu module carries the "
+        "bc250_flush_by_runlist fix. Training does exactly that.",
         "Compute needs kernel 7.1.5 or newer plus a patched amdgpu module. On "
         "older kernels the correctness fix forces the board to 24 CU, where "
         "compute wedges.",
         "After a compute wedge, power-cycle rather than soft-reboot.",
-        "A from-source PyTorch built for gfx1013 might lift the training "
-        "blocker. Nobody has published a result either way.",
+        "A torch built from source with PYTORCH_ROCM_ARCH=gfx1013 is the only "
+        "known way to lift the kernel blocker; scripts/bc250/build.sh does it. "
+        "Nobody has published a result either way, so treat './run doctor's "
+        "autograd probe as the verdict rather than this text.",
     ),
 )
 
@@ -192,7 +207,12 @@ def unsupported_arch_advice(profile: HardwareProfile) -> str:
         f"This is {profile.title}. No stock ROCm wheel ships kernels for it, "
         f"so swapping the torch index will not help"
     )
-    return advice + (f" — see {where}." if where else ".")
+    advice += f" — see {where}." if where else "."
+    if profile.build_script:
+        advice += (
+            f" Building one that does is what {profile.build_script} is for."
+        )
+    return advice
 
 
 def apply(profile: HardwareProfile, target: Any) -> list[str]:
@@ -274,20 +294,60 @@ def modparam(module: str, name: str) -> str | None:
         return None
 
 
-def rocblas_has_gfx1013(torch_lib_dirs: Sequence[Path]) -> bool | None:
+# Prefixes that can hold a rocBLAS Tensile library directory. A pip torch wheel
+# bundles its own copy under ``torch/lib``; a torch built from source links
+# against the system one instead, so both have to be searched or the answer
+# depends on how torch was installed rather than on what is on disk.
+# ``/opt/bc250`` is where scripts/bc250/build.sh installs its gfx1013 build.
+SYSTEM_ROCBLAS_PREFIXES = (
+    "/opt/rocm/lib",
+    "/opt/bc250/rocm/lib",
+    "/usr/lib64",
+    "/usr/lib",
+)
+
+
+def rocblas_library_dirs(torch_lib_dirs: Sequence[Path] = ()) -> list[Path]:
+    """Every directory that could hold rocBLAS Tensile libraries, in order.
+
+    ``ROCBLAS_TENSILE_LIBPATH`` is rocBLAS's own override and points straight at
+    the library directory; everywhere else it sits under ``rocblas/library``.
+    """
+    candidates: list[Path] = []
+    override = os.environ.get("ROCBLAS_TENSILE_LIBPATH", "").strip()
+    if override:
+        candidates.append(Path(override))
+    for base in (*torch_lib_dirs, *(Path(p) for p in SYSTEM_ROCBLAS_PREFIXES)):
+        candidates.append(Path(base) / "rocblas" / "library")
+
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def rocblas_has_gfx1013(torch_lib_dirs: Sequence[Path] = ()) -> bool | None:
     """Whether a rocBLAS with gfx1013 kernels is present.
 
-    The stock ROCm wheel ships no gfx1013 Tensile libraries, which is the
-    proximate cause of 'invalid device function'. A native build produces
-    ``Kernels.so-000-gfx1013.hsaco``. ``None`` means we could not tell.
+    The stock ROCm wheel ships no gfx1013 Tensile libraries. A native build
+    produces ``Kernels.so-000-gfx1013.hsaco``. ``None`` means we could not tell
+    — no rocBLAS library directory existed anywhere we looked, which is the
+    normal answer on a CUDA or CPU install.
     """
     searched = False
-    for base in torch_lib_dirs:
-        library = base / "rocblas" / "library"
+    for library in rocblas_library_dirs(torch_lib_dirs):
         if not library.is_dir():
             continue
         searched = True
-        for entry in library.iterdir():
+        try:
+            entries = list(library.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
             if "gfx1013" in entry.name:
                 return True
     return False if searched else None
@@ -403,25 +463,26 @@ def bc250_checks(torch_lib_dirs: Sequence[Path] = ()) -> list[SystemCheck]:
             )
         )
 
-    if torch_lib_dirs:
-        has = rocblas_has_gfx1013(torch_lib_dirs)
-        if has is True:
-            checks.append(
-                SystemCheck(OK, "rocBLAS gfx1013 kernels", "present")
+    has = rocblas_has_gfx1013(torch_lib_dirs)
+    if has is True:
+        checks.append(SystemCheck(OK, "rocBLAS gfx1013 kernels", "present"))
+    elif has is False:
+        # Deliberately a warning, not a failure. rocBLAS is the GEMM library:
+        # building it for gfx1013 fixes matmul throughput and nothing else. The
+        # training blocker is missing elementwise and convolution kernels, which
+        # come from torch's own device code, so this check going green does not
+        # unblock training and this check being red is not what blocks it.
+        checks.append(
+            SystemCheck(
+                WARN,
+                "rocBLAS gfx1013 kernels",
+                "absent",
+                "Matmul falls back to something much slower. Building rocBLAS "
+                "for gfx1013 fixes GEMM only — see 'torch gfx1013 kernels' "
+                "above for the check that governs training. "
+                "scripts/bc250/build.sh does both.",
             )
-        elif has is False:
-            checks.append(
-                SystemCheck(
-                    FAIL,
-                    "rocBLAS gfx1013 kernels",
-                    "absent from the installed torch",
-                    "The stock ROCm wheel ships no gfx1013 Tensile libraries, "
-                    "which is what makes autograd raise 'invalid device "
-                    "function'. Building rocBLAS for gfx1013 and grafting it "
-                    "into the wheel is documented at "
-                    f"{BC250_REFERENCE} (scripts/build_rocblas_gfx1013.sh).",
-                )
-            )
+        )
 
     return checks
 

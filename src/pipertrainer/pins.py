@@ -46,6 +46,34 @@ class TorchPin:
 
 
 @dataclass(frozen=True)
+class BC250Pins:
+    """Everything ``scripts/bc250/build.sh`` fetches or builds.
+
+    Read by the shell driver through ``--print-pin``, so that the scripts and
+    this file cannot disagree about which commit of somebody else's kernel
+    patch we are applying.
+    """
+
+    reference_repo: str
+    reference_sha: str
+    cu_unlock_repo: str
+    cu_unlock_sha: str
+    container_image: str
+    container_name: str
+    container_python: str
+    torch_repo: str
+    torch_tag: str
+    torch_local_version: str
+    gfx_target: str
+    build_free_gib: int
+
+    @property
+    def torch_version(self) -> str:
+        """``v2.9.1`` + ``rocm6.4.gfx1013`` -> ``2.9.1+rocm6.4.gfx1013``."""
+        return f"{self.torch_tag.lstrip('v')}+{self.torch_local_version}"
+
+
+@dataclass(frozen=True)
 class Pins:
     raw: dict[str, Any]
 
@@ -127,6 +155,27 @@ class Pins:
     @property
     def checkpoint_repo(self) -> str:
         return self.raw["checkpoints"]["repo"]
+
+    # --- bc250 ------------------------------------------------------------
+    @property
+    def bc250(self) -> BC250Pins:
+        try:
+            entry = self.raw["bc250"]
+        except KeyError as exc:
+            raise PinsError("pins.toml has no [bc250] section") from exc
+        fields = BC250Pins.__dataclass_fields__
+        missing = sorted(name for name in fields if name not in entry)
+        if missing:
+            raise PinsError(
+                f"[bc250] in pins.toml is missing: {', '.join(missing)}"
+            )
+        # `from __future__ import annotations` makes field types strings.
+        return BC250Pins(
+            **{
+                name: int(entry[name]) if spec.type in (int, "int") else str(entry[name])
+                for name, spec in fields.items()
+            }
+        )
 
     # --- disk -------------------------------------------------------------
     @property

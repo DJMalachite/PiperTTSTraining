@@ -63,7 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument(
         "--torch-spec",
         metavar="SPEC",
-        help="override the torch requirement from pins.toml, e.g. torch==2.6.0",
+        help=(
+            "override the torch requirement from pins.toml, e.g. torch==2.6.0; "
+            "a path to a local .whl is installed directly, with no index"
+        ),
     )
 
     sub.add_parser("doctor", help="diagnose the environment and report problems")

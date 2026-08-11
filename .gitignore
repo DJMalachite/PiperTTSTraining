@@ -1,7 +1,10 @@
 # Runtime artifacts — none of this belongs in git.
+# The -* variants are the named environments PIPERTRAINER_ENV selects.
 .venv/
+.venv-*/
 piper1-gpl/
 .state/
+.state-*/
 data/
 runs/
 voices/

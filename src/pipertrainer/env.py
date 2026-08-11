@@ -32,7 +32,7 @@ import os
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 from . import pins, proc
 from .paths import (
@@ -120,6 +120,34 @@ print(json.dumps(info))
 """
 
 
+def normalise_gfx(target: str | None) -> str:
+    """``gfx1013:sramecc-:xnack-`` -> ``gfx1013``. Empty for anything unusable."""
+    if not target:
+        return ""
+    return target.split(":")[0].strip().lower()
+
+
+def compiled_for_device(gcn_arch: str | None, arch_list: Sequence[str]) -> bool | None:
+    """Does this torch build carry device code for this GPU?
+
+    torch's HIP and CUDA kernels are compiled ahead of time, once per target in
+    ``torch.cuda.get_arch_list()``. A device absent from that list has no
+    elementwise or convolution kernels, and every launch raises 'invalid device
+    function' — while ``torch.cuda.is_available()`` returns True and a matmul
+    still succeeds, because GEMM comes from rocBLAS, a separate library with its
+    own target list. That combination is precisely the BC-250's symptom, and it
+    is why this question has to be asked independently of whether matmul worked.
+
+    ``None`` means unanswerable: no reported target (a CUDA build, or no GPU) or
+    an empty arch list. Never guess here — a false 'no' would send someone off
+    to rebuild torch for no reason.
+    """
+    target = normalise_gfx(gcn_arch)
+    if not target or not target.startswith("gfx") or not arch_list:
+        return None
+    return any(normalise_gfx(entry) == target for entry in arch_list)
+
+
 @dataclass
 class TorchInfo:
     """Result of probing torch. ``usable`` is the only field worth trusting."""
@@ -152,6 +180,10 @@ class TorchInfo:
     @property
     def usable_gpu(self) -> bool:
         return self.available and self.matmul_ok
+
+    @property
+    def compiled_for_device(self) -> bool | None:
+        return compiled_for_device(self.gcn_arch, self.arch_list)
 
     @property
     def total_memory_gib(self) -> float:

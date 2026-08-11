@@ -9,7 +9,9 @@ earlier version of this repo applied it automatically, so there is a test.
 
 from __future__ import annotations
 
+import os
 import unittest
+from unittest import mock
 
 from . import _support  # noqa: F401
 
@@ -255,6 +257,30 @@ class RocblasDetectionTest(unittest.TestCase):
             self.assertIs(H.rocblas_has_gfx1013([Path(tmp)]), False)
             (library / "Kernels.so-000-gfx1013.hsaco").write_bytes(b"")
             self.assertIs(H.rocblas_has_gfx1013([Path(tmp)]), True)
+
+    def test_the_system_rocm_is_searched_too(self):
+        # A torch built from source links against the system rocBLAS instead of
+        # bundling one, so looking only inside the wheel would make the answer
+        # depend on how torch was installed rather than on what is on disk.
+        dirs = [str(p) for p in H.rocblas_library_dirs()]
+        for prefix in ("/opt/rocm/lib", "/opt/bc250/rocm/lib"):
+            with self.subTest(prefix=prefix):
+                self.assertIn(f"{prefix}/rocblas/library".replace("/", os.sep), dirs)
+
+    def test_the_tensile_override_is_honoured_and_comes_first(self):
+        # ROCBLAS_TENSILE_LIBPATH is rocBLAS's own variable and points straight
+        # at the library directory, so it is not suffixed like the others.
+        with mock.patch.dict(
+            os.environ, {"ROCBLAS_TENSILE_LIBPATH": "/somewhere/library"}
+        ):
+            dirs = H.rocblas_library_dirs()
+        self.assertEqual(str(dirs[0]), os.path.normpath("/somewhere/library"))
+
+    def test_the_search_order_has_no_duplicates(self):
+        from pathlib import Path
+
+        dirs = H.rocblas_library_dirs([Path("/opt/rocm/lib")])
+        self.assertEqual(len(dirs), len(set(str(d) for d in dirs)))
 
 
 class TrainingProbeTest(unittest.TestCase):

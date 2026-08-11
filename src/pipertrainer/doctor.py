@@ -323,6 +323,31 @@ def run(offline: bool = False) -> int:
                 "sudo usermod -aG render,video $USER, then log out and back in. "
                 "This is the most common cause of ROCm not seeing the GPU.",
             )
+        # Asked independently of the matmul below, because the interesting case
+        # passes matmul and fails everything else: GEMM comes from rocBLAS, so a
+        # device missing from torch's arch list can multiply matrices all day
+        # and still have no kernel for `a + b`.
+        compiled = info.compiled_for_device
+        if compiled is True:
+            report.add(
+                OK,
+                "torch gfx kernels",
+                f"built for {env_mod.normalise_gfx(info.gcn_arch)}",
+            )
+        elif compiled is False:
+            hw = hardware_mod.resolve(_configured_hardware(), info.gcn_arch)
+            report.add(
+                # Expected on a board documented as blocked; a genuine surprise
+                # anywhere else.
+                WARN if hw.training == hardware_mod.BLOCKED else FAIL,
+                "torch gfx kernels",
+                f"this torch has no {env_mod.normalise_gfx(info.gcn_arch)} "
+                f"code (built for {', '.join(info.arch_list)})",
+                "Every kernel launch outside rocBLAS raises 'invalid device "
+                "function', which is what blocks training while leaving matmul "
+                "working. " + hardware_mod.unsupported_arch_advice(hw),
+            )
+
         if state.vendor != "cpu" and not info.available:
             report.add(
                 FAIL,
@@ -462,22 +487,36 @@ def _hardware_section(report: Report, info: env_mod.TorchInfo, state) -> None:
             OK, "training probe", probe.verdict
         )
     else:
-        expected = hw.training == hardware_mod.BLOCKED
-        report.add(
-            WARN if expected else FAIL,
-            "training probe",
-            probe.verdict,
-            (
+        # A blocked board is only *expected* to fail while torch has no kernels
+        # for it. Once it does — a from-source build, see docs/BC250.md — a
+        # failure stops being a confirmation and becomes a real result worth
+        # failing on, because the documented cause has been removed.
+        expected = (
+            hw.training == hardware_mod.BLOCKED
+            and info.compiled_for_device is not True
+        )
+        if expected:
+            fix = (
                 "This matches what is documented for this board, so it is a "
-                "confirmation rather than a surprise. Train on CPU, or on "
-                "another machine, and use this one for dataset preparation. "
-                f"See docs/BC250.md and {hw.reference}."
-                if expected
-                else "The GPU can do arithmetic but cannot complete a training "
+                "confirmation rather than a surprise. Either build a torch "
+                f"that has kernels for it ({hw.build_script}), or train on CPU "
+                "or another machine and use this one for dataset preparation. "
+                f"See {hw.doc or 'docs/GPU_SETUP.md'} and {hw.reference}."
+            )
+        elif hw.training == hardware_mod.BLOCKED:
+            fix = (
+                "torch does carry kernels for this device, so the usual cause "
+                "is ruled out and this failure is new information. Capture the "
+                f"error above and report it to {hw.reference} — nobody has "
+                f"published a result either way. See {hw.doc}."
+            )
+        else:
+            fix = (
+                "The GPU can do arithmetic but cannot complete a training "
                 "step. Usually this means the torch build has no kernels for "
                 "this architecture. See docs/GPU_SETUP.md."
-            ),
-        )
+            )
+        report.add(WARN if expected else FAIL, "training probe", probe.verdict, fix)
 
 
 def _import_fix(name: str) -> str:

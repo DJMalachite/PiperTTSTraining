@@ -11,6 +11,7 @@ described in exactly one place. Two rules hold throughout:
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,9 +19,34 @@ from pathlib import Path
 # src/pipertrainer/paths.py -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def slug(name: str) -> str:
+    """Collapse arbitrary text into something safe for a path component."""
+    cleaned = _UNSAFE.sub("-", name.strip()).strip("-._")
+    return cleaned or "voice"
+
+
+def env_suffix() -> str:
+    """``PIPERTRAINER_ENV=bc250`` -> ``-bc250``; unset -> ``""``.
+
+    One repo can need more than one installed environment. The BC-250 builds a
+    gfx1013 torch inside a Fedora container that shares ``$HOME`` with the host
+    (see docs/BC250.md), and a venv built there must not collide with the
+    host's — different distribution, different libc, different torch. Naming
+    the environment gives each its own ``.venv-<name>`` and ``.state-<name>``.
+
+    Unset is the overwhelmingly common case and must keep the historic layout
+    byte for byte, so that existing clones see no change at all.
+    """
+    name = os.environ.get("PIPERTRAINER_ENV", "").strip()
+    return f"-{slug(name)}" if name else ""
+
+
 PINS_FILE = REPO_ROOT / "pins.toml"
-VENV_DIR = REPO_ROOT / ".venv"
-STATE_DIR = REPO_ROOT / ".state"
+VENV_DIR = REPO_ROOT / f".venv{env_suffix()}"
+STATE_DIR = REPO_ROOT / f".state{env_suffix()}"
 PIPER_DIR = REPO_ROOT / "piper1-gpl"
 PROFILES_DIR = REPO_ROOT / "profiles"
 CHECKPOINTS_DIR = REPO_ROOT / "checkpoints"
@@ -33,15 +59,6 @@ SETUP_STATE = STATE_DIR / "setup.json"
 ENV_SH = STATE_DIR / "env.sh"
 TORCH_CONSTRAINT = STATE_DIR / "torch-constraint.txt"
 ACTIVE_PROFILE = STATE_DIR / "active-profile"
-
-_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-def slug(name: str) -> str:
-    """Collapse arbitrary text into something safe for a path component."""
-    cleaned = _UNSAFE.sub("-", name.strip()).strip("-._")
-    return cleaned or "voice"
-
 
 def venv_python() -> Path:
     """Interpreter inside the project venv (may not exist before setup)."""
