@@ -683,12 +683,15 @@ def step_verify(ctx: Context) -> None:
             f"been saved to .state/env.sh"
         )
     if ctx.vendor != "cpu" and not info.usable_gpu:
+        from . import hardware as hardware_mod
+
         detail = info.matmul_error or info.error or "no GPU visible"
+        advice = hardware_mod.unsupported_arch_advice(
+            hardware_mod.detect(info.gcn_arch)
+        )
         ctx.warn(
             f"torch cannot use the GPU: {detail}. Training will fall back to "
-            f"CPU, which is far slower. See docs/GPU_SETUP.md — try another "
-            f"ROCm index from pins.toml with "
-            f"'./run setup --force-step torch --torch-index ...'."
+            f"CPU, which is far slower. {advice}"
         )
     elif info.usable_gpu:
         tui.ok(

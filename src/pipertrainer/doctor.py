@@ -155,6 +155,8 @@ def _espeak_voice_check(report: Report, voice: str) -> None:
 
 
 def run(offline: bool = False) -> int:
+    from . import hardware as hardware_mod
+
     report = Report()
     pins = pins_mod.load()
     state = env_mod.SetupState.load()
@@ -328,10 +330,10 @@ def run(offline: bool = False) -> int:
                 f"a real matmul failed: {info.matmul_error or 'process aborted'}",
                 "torch.cuda.is_available() lies on unsupported ROCm targets. "
                 f"Device reports {info.gcn_arch or 'unknown'}; torch was built "
-                f"for {', '.join(info.arch_list) or 'unknown'}. Try a different "
-                "ROCm index from pins.toml: './run setup --force-step torch "
-                "--torch-index https://download.pytorch.org/whl/rocm6.3 "
-                "--torch-spec torch==2.6.0'.",
+                f"for {', '.join(info.arch_list) or 'unknown'}. "
+                + hardware_mod.unsupported_arch_advice(
+                    hardware_mod.resolve(_configured_hardware(), info.gcn_arch)
+                ),
             )
         elif info.available:
             report.add(
@@ -398,19 +400,23 @@ def _torch_lib_dirs() -> list[Path]:
     return [Path(result.lines[-1].strip())]
 
 
-def _hardware_section(report: Report, info: env_mod.TorchInfo, state) -> None:
-    """Hardware-specific checks, and the one that actually predicts training."""
-    from . import hardware as hardware_mod
-
-    configured = "auto"
+def _configured_hardware() -> str:
+    """``runtime.hardware`` from the active profile, or 'auto'."""
     active = profile_mod.get_active()
     if active:
         try:
             prof, _ = profile_mod.load_by_name(active)
-            configured = prof.runtime.hardware
+            return prof.runtime.hardware
         except profile_mod.ProfileError:
             pass
+    return "auto"
 
+
+def _hardware_section(report: Report, info: env_mod.TorchInfo, state) -> None:
+    """Hardware-specific checks, and the one that actually predicts training."""
+    from . import hardware as hardware_mod
+
+    configured = _configured_hardware()
     hw = hardware_mod.resolve(configured, info.gcn_arch)
     tui.heading(f"Hardware profile: {hw.name}")
     tui.info(f"  {hw.title}")

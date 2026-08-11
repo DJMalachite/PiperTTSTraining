@@ -68,8 +68,10 @@ at the first real kernel launch — often `SIGABRT`, sometimes
 ```
 
 If the matmul check fails, see [GPU_SETUP.md](GPU_SETUP.md). On a **BC-250
-(gfx1013)** do not reach for `HSA_OVERRIDE_GFX_VERSION` — it makes things worse
-on that board; see [BC250.md](BC250.md). Otherwise try a different ROCm build:
+(gfx1013)** neither of the usual moves helps: `HSA_OVERRIDE_GFX_VERSION` makes
+things worse, and no stock ROCm wheel of any version ships gfx1013 kernels, so
+re-downloading torch from another index costs gigabytes and fails identically.
+See [BC250.md](BC250.md) instead. On any other card, try a different ROCm build:
 
 ```bash
 ./run setup --force-step torch --force-step constraint --torch-index https://download.pytorch.org/whl/rocm6.3 --torch-spec torch==2.6.0

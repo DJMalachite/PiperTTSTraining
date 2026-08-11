@@ -55,6 +55,8 @@ class HardwareProfile:
     banned_env: dict[str, str] = field(default_factory=dict)
     training: str = SUPPORTED
     reference: str = ""
+    #: Our own document for this board, if it has one.
+    doc: str = ""
 
     @property
     def is_generic(self) -> bool:
@@ -111,6 +113,7 @@ BC250 = HardwareProfile(
     },
     training=BLOCKED,
     reference=BC250_REFERENCE,
+    doc="docs/BC250.md",
     caveats=(
         "Full training is reported as blocked: the stock torch ROCm wheel ships "
         "no gfx1013 elementwise kernels, so autograd raises 'invalid device "
@@ -163,6 +166,33 @@ def resolve(configured: str, gcn_arch: str | None) -> HardwareProfile:
     if configured and configured != "auto":
         return get(configured)
     return detect(gcn_arch)
+
+
+GENERIC_ARCH_ADVICE = (
+    "See docs/GPU_SETUP.md, and try a different ROCm index from pins.toml: "
+    "'./run setup --force-step torch --torch-index "
+    "https://download.pytorch.org/whl/rocm6.3 --torch-spec torch==2.6.0'."
+)
+
+
+def unsupported_arch_advice(profile: HardwareProfile) -> str:
+    """What to actually try when torch ships no kernels for this device.
+
+    Swapping ROCm wheels is the right first move for a card that is merely
+    missing from one build's arch list. It is a dead end for hardware carrying
+    a BLOCKED profile: no stock wheel of any ROCm version ships those kernels,
+    so the swap costs a multi-gigabyte download and then fails identically.
+    Defer to the profile there, the same way we refuse to suggest
+    HSA_OVERRIDE_GFX_VERSION on gfx1013.
+    """
+    if profile.is_generic or profile.training != BLOCKED:
+        return GENERIC_ARCH_ADVICE
+    where = " and ".join(part for part in (profile.doc, profile.reference) if part)
+    advice = (
+        f"This is {profile.title}. No stock ROCm wheel ships kernels for it, "
+        f"so swapping the torch index will not help"
+    )
+    return advice + (f" — see {where}." if where else ".")
 
 
 def apply(profile: HardwareProfile, target: Any) -> list[str]:

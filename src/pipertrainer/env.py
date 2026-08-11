@@ -32,10 +32,15 @@ import os
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import pins, proc
 from .paths import ENV_SH, SETUP_STATE, STATE_DIR, TORCH_CONSTRAINT, venv_python
+
+if TYPE_CHECKING:
+    # Imported for real inside the functions that need it, matching how the
+    # rest of the package reaches for hardware profiles.
+    from .hardware import HardwareProfile
 
 VENDORS = ("rocm", "cuda", "cpu")
 
@@ -610,6 +615,17 @@ def pip_env() -> dict[str, str]:
     return env
 
 
+def resolved_hardware(hardware_name: str = "auto") -> HardwareProfile:
+    """The hardware profile in force: configuration plus the recorded target.
+
+    Reads the gfx target from setup state rather than probing, so this is cheap
+    enough to call from an error path.
+    """
+    from . import hardware as hardware_mod
+
+    return hardware_mod.resolve(hardware_name, SetupState.load().info.gcn_arch)
+
+
 def training_env(
     runtime_env: dict[str, str] | None = None,
     *,
@@ -624,10 +640,8 @@ def training_env(
     setting the hardware profile bans is never *inferred*, only ever set
     deliberately.
     """
-    from . import hardware as hardware_mod
-
     state = SetupState.load()
-    profile = hardware_mod.resolve(hardware_name, state.info.gcn_arch)
+    profile = resolved_hardware(hardware_name)
     env: dict[str, str] = {}
 
     if state.hsa_override and "HSA_OVERRIDE_GFX_VERSION" not in profile.banned_env:

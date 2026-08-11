@@ -122,6 +122,45 @@ class BC250ProfileTest(unittest.TestCase):
         self.assertLessEqual(H.BC250.settings["data.num_workers"], 2)
 
 
+class UnsupportedArchAdviceTest(unittest.TestCase):
+    """The index-swap suggestion is a dead end on a BLOCKED board.
+
+    No stock ROCm wheel of any version ships gfx1013 Tensile kernels, so
+    telling a BC-250 owner to re-download torch from another index costs
+    gigabytes and fails identically. Same class of mistake as suggesting
+    HSA_OVERRIDE_GFX_VERSION.
+    """
+
+    def test_generic_hardware_gets_the_index_swap(self):
+        advice = H.unsupported_arch_advice(H.GENERIC)
+        self.assertIn("--torch-index", advice)
+        self.assertIn("pins.toml", advice)
+
+    def test_an_unlisted_card_still_gets_the_index_swap(self):
+        # gfx1031 is a normal RDNA2 laptop part missing from some builds:
+        # a different wheel genuinely can fix it.
+        advice = H.unsupported_arch_advice(H.detect("gfx1031"))
+        self.assertIn("--torch-index", advice)
+
+    def test_bc250_is_never_told_to_swap_the_torch_index(self):
+        advice = H.unsupported_arch_advice(H.detect("gfx1013:xnack-"))
+        self.assertNotIn("--torch-index", advice)
+        self.assertNotIn("--torch-spec", advice)
+        self.assertNotIn("rocm6.3", advice)
+
+    def test_bc250_is_pointed_at_the_documentation_instead(self):
+        advice = H.unsupported_arch_advice(H.detect("gfx1013"))
+        self.assertIn("docs/BC250.md", advice)
+        self.assertIn(H.BC250_REFERENCE, advice)
+
+    def test_every_blocked_profile_documents_itself(self):
+        # The advice is only useful because it has somewhere to send people.
+        for profile in H.PROFILES.values():
+            if profile.training == H.BLOCKED:
+                with self.subTest(profile=profile.name):
+                    self.assertTrue(profile.doc or profile.reference)
+
+
 class ApplyTest(unittest.TestCase):
     def test_apply_forces_settings_and_reports_them(self):
         prof = P.Profile()

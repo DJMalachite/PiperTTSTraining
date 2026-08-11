@@ -506,11 +506,11 @@ def _diagnose_failure(prepared: Prepared, result: proc.Result) -> None:
             "the ROCm runtime aborted. This is the signature of a GPU "
             "architecture the torch build has no kernels for."
         )
-        tui.info(
-            "Run './run doctor' — if the matmul check fails, try another ROCm "
-            "index from pins.toml with './run setup --force-step torch "
-            "--torch-index ... --torch-spec ...'."
-        )
+        from .. import hardware as hardware_mod
+
+        hw = env_mod.resolved_hardware(prepared.profile.runtime.hardware)
+        tui.info("Run './run doctor' to confirm the matmul check also fails.")
+        tui.info(hardware_mod.unsupported_arch_advice(hw))
         return
 
     tui.error(f"training exited with code {result.returncode}")
