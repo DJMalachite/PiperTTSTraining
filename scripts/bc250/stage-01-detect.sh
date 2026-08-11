@@ -64,17 +64,25 @@ else
 fi
 
 head_ "Compute units"
-if cu=$(dmesg 2>/dev/null | grep -o 'active_cu_number[ :=]*[0-9]*' | tail -n1); then
-    count=$(printf '%s' "$cu" | grep -o '[0-9]*$')
-    if [ "${count:-0}" -ge 40 ]; then
+# sed rather than grep, because grep exits 1 when it matches nothing and this
+# script runs under `set -e`: a bare `count=$(... | grep ...)` would abort the
+# whole stage silently. Most distributions set kernel.dmesg_restrict, so the
+# no-match path is the common one, not the exceptional one.
+if dmesg >/dev/null 2>&1; then
+    count=$(dmesg 2>/dev/null |
+        sed -n 's/.*active_cu_number[^0-9]*\([0-9][0-9]*\).*/\1/p' | tail -n1)
+    if [ -z "$count" ]; then
+        info "dmesg has nothing about active_cu_number (the ring buffer may have wrapped)"
+    elif [ "$count" -ge 40 ]; then
         ok "active_cu_number $count"
     else
-        warn "active_cu_number ${count:-unknown} — the 40-CU unlock is not active"
+        warn "active_cu_number $count — the 40-CU unlock is not active"
         info "Power-cycle rather than soft-reboot if this follows a compute wedge."
         missing=$((missing + 1))
     fi
 else
-    info "dmesg is unreadable here; run this stage as root to see the CU count"
+    info "dmesg is unreadable here (kernel.dmesg_restrict); to check it yourself:"
+    info "  sudo dmesg | grep active_cu_number"
 fi
 
 head_ "Build environment"

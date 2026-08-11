@@ -53,14 +53,24 @@ refuse() {
 # cannot disagree with the Python side about which commit we are applying.
 # --------------------------------------------------------------------------
 
+# Every caller does `x=$(pin name)` under `set -e`, so a silent non-zero exit
+# here would abort a stage with no output at all. Fail loudly instead: the
+# message still reaches stderr from inside the command substitution.
 pin() {
-    python3 - "$1" <<'PY'
+    command -v python3 >/dev/null 2>&1 ||
+        refuse "python3 is not on PATH" \
+            "Everything here reads pins.toml through it: 'sudo pacman -S python'."
+    _pin_value=$(
+        python3 - "$1" <<'PY'
 import sys, os
 sys.path.insert(0, os.path.join(os.environ["BC250_REPO"], "src"))
 from pipertrainer import pins
 value = getattr(pins.load().bc250, sys.argv[1])
 print(value)
 PY
+    ) || refuse "could not read '$1' from pins.toml [bc250]" \
+        "The Python error is above; the section may be missing a key."
+    printf '%s\n' "$_pin_value"
 }
 
 # --------------------------------------------------------------------------

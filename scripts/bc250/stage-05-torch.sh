@@ -52,14 +52,16 @@ fi
 # the memory peak, not the compiles. Sizing by nproc is how this build gets
 # OOM-killed six hours in.
 
-mem_gib=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+mem_gib=$(awk '/^MemTotal:/ {printf "%d", $2/1024/1024}' /proc/meminfo || echo 8)
+[ -n "$mem_gib" ] || mem_gib=8
 cores=$(nproc)
 jobs=$((mem_gib / 2))
 [ "$jobs" -lt 1 ] && jobs=1
 [ "$jobs" -gt "$cores" ] && jobs="$cores"
 info "${mem_gib} GiB RAM, ${cores} cores -> MAX_JOBS=$jobs"
 
-swap_gib=$(awk '/SwapTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+swap_gib=$(awk '/^SwapTotal:/ {printf "%d", $2/1024/1024}' /proc/meminfo || echo 0)
+[ -n "$swap_gib" ] || swap_gib=0
 if [ "$swap_gib" -lt 8 ]; then
     warn "only ${swap_gib} GiB of swap"
     info "A link step that runs out of memory kills the build after hours of"
