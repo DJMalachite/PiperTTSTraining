@@ -6,8 +6,15 @@
 #   scripts/bc250/build.sh --stage torch   run exactly one stage
 #   scripts/bc250/build.sh --from rocblas  run from that stage onwards
 #   scripts/bc250/build.sh --force ...     re-run stages already marked done
+#   scripts/bc250/build.sh --reset torch   delete one stage's artefacts, then stop
+#   scripts/bc250/build.sh --reset all     delete every stage's artefacts
 #   scripts/bc250/build.sh --dry-run       print every command, change nothing
 #   scripts/bc250/build.sh --yes           do not ask before root commands
+#
+# Interrupted part-way? Just run it again. A stage is only marked done once it
+# exits cleanly, so the next run resumes at the one that did not finish, and the
+# expensive stages resume rather than restart. --reset is for when a stage's own
+# artefacts are the problem, not for ordinary interruptions.
 #
 # Read docs/BC250.md first. The short version: the stock torch ROCm wheel
 # contains no gfx1013 device code, so every kernel launch outside rocBLAS
@@ -44,12 +51,113 @@ usage() {
     sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
+# What each stage leaves behind, for --reset. An interrupted stage does not
+# need this: its done- marker was never written, so re-running resumes there.
+# This is for the case where a stage's own artefacts are the problem — a
+# half-applied patch, a wedged build tree — and only that case, because some of
+# these represent hours.
+#
+# Deliberately absent: the downloaded kernel tarball (expensive to fetch, cheap
+# to re-extract) and the patched amdgpu module already installed on the host,
+# which is undone by restoring the backup rather than by deleting anything.
+stage_artefacts() {
+    case "$1" in
+        detect) ;;
+        kernel) printf '%s\n' "$BC250_STATE"/linux-* ;;
+        container) printf 'container:%s\n' "$container_name" ;;
+        rocblas) printf '%s\n%s\n' "$HOME/rocBLAS" "$HOME/Tensile" ;;
+        torch)
+            printf '%s\n%s\n%s\n' \
+                "$HOME/pytorch" "$BC250_STATE/build-venv" "$BC250_WHEELS"
+            ;;
+        install)
+            printf '%s\n%s\n' \
+                "$BC250_REPO/.venv-bc250" "$BC250_REPO/.state-bc250"
+            ;;
+    esac
+}
+
+reset_stage() {
+    name=$1
+    targets=""
+    for target in $(stage_artefacts "$name"); do
+        case "$target" in
+            container:*)
+                command -v distrobox >/dev/null 2>&1 &&
+                    distrobox list 2>/dev/null |
+                    grep -q "[[:space:]]${target#container:}[[:space:]]" &&
+                    targets="$targets $target"
+                ;;
+            *)
+                # An empty directory is not an artefact: a later build recreates
+                # the scaffolding, and offering to delete nothing trains people
+                # to answer 'y' without reading.
+                if [ -d "$target" ]; then
+                    [ -n "$(ls -A "$target" 2>/dev/null)" ] &&
+                        targets="$targets $target"
+                elif [ -e "$target" ]; then
+                    targets="$targets $target"
+                fi
+                ;;
+        esac
+    done
+
+    if [ -z "$targets" ] && ! stage_done "$name"; then
+        say "-- $name: nothing to reset"
+        return 0
+    fi
+
+    say ""
+    say "reset '$name' would remove:"
+    stage_done "$name" && say "    the 'done' marker"
+    for target in $targets; do
+        case "$target" in
+            container:*) say "    the '${target#container:}' container" ;;
+            *) say "    $target" ;;
+        esac
+    done
+    case "$name" in
+        torch) say "  NOTE: that includes the built wheel. Hours of compiling." ;;
+        kernel)
+            say "  NOTE: this removes the patched source tree only. The module"
+            say "  already installed on this host is untouched; restore it from"
+            say "  its .bc250-backup-* file if that is what you need to undo."
+            ;;
+    esac
+
+    if [ "$BC250_DRY_RUN" = "1" ]; then
+        say "  (--dry-run: nothing removed)"
+        return 0
+    fi
+    confirm "remove the above?" || { say "  left alone"; return 0; }
+
+    for target in $targets; do
+        case "$target" in
+            container:*) runcmd distrobox rm --force "${target#container:}" ;;
+            *)
+                # Never let an unset variable turn this into rm -rf /
+                case "$target" in
+                    "$BC250_REPO"/* | "$HOME"/*) runcmd rm -rf "$target" ;;
+                    *) warn "refusing to remove $target (outside the repo and \$HOME)" ;;
+                esac
+                ;;
+        esac
+    done
+    clear_done "$name"
+    say "-- $name: reset"
+}
+
 only=""
 from=""
+reset=""
 force=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --reset)
+            reset=${2:?--reset needs a stage name, or 'all'}
+            shift 2
+            ;;
         --list)
             printf '%-11s %-5s %s\n' STAGE WHERE STATE
             for name in $(stage_names); do
@@ -79,10 +187,29 @@ for name in $only $from; do
     [ -n "$(stage_where "$name")" ] ||
         refuse "unknown stage: $name" "Known stages: $(stage_names | tr '\n' ' ')"
 done
-
-mkdir -p "$BC250_STATE" "$BC250_SRC" "$BC250_WHEELS"
+if [ -n "$reset" ] && [ "$reset" != "all" ] && [ -z "$(stage_where "$reset")" ]; then
+    refuse "unknown stage: $reset" \
+        "Known stages: $(stage_names | tr '\n' ' ') (or 'all')"
+fi
 
 container_name=$(pin container_name)
+
+# Before the mkdir below, or resetting a stage and then recreating its empty
+# directories would leave --reset with something to offer every single time.
+if [ -n "$reset" ]; then
+    if [ "$reset" = "all" ]; then
+        for name in $(stage_names); do
+            reset_stage "$name"
+        done
+    else
+        reset_stage "$reset"
+    fi
+    say ""
+    say "Re-run scripts/bc250/build.sh to build again."
+    exit 0
+fi
+
+mkdir -p "$BC250_STATE" "$BC250_SRC" "$BC250_WHEELS"
 
 # Re-enter the container for stages that belong there. distrobox shares $HOME,
 # so this repo is the same repo on both sides of the boundary; only the
