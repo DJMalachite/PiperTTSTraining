@@ -37,36 +37,69 @@ say "  This clones Tensile and rocBLAS and compiles 56 Tensile libraries."
 say "  It takes a long time and it is somebody else's script — read it first:"
 say "    $script"
 say ""
+# The library itself, not the Tensile code objects beside it. Those are two
+# different questions and conflating them is how this stage used to report
+# success on a build that had failed: Tensile generates its gfx1013 kernels
+# early and they survive a link that never happens.
+librocblas() {
+    ls "$BUILD"/library/src/librocblas.so* 2>/dev/null | head -n1
+}
+
 if [ "$BC250_DRY_RUN" = "1" ]; then
     info "\$ sh $script"
-elif [ -d "$BUILD/Tensile/library" ] &&
-    [ "$(find "$BUILD/Tensile/library" -name '*gfx1013*' | wc -l)" -gt 0 ]; then
-    ok "already built at $BUILD"
+elif [ -n "$(librocblas)" ]; then
+    ok "already built: $(librocblas)"
 else
     confirm "run it now?" || refuse "declined" \
         "Run it yourself, then re-run this stage; it will pick up the artefacts."
-    sh "$script" || refuse "the rocBLAS build failed" \
-        "The log is above. This is the stage most sensitive to the ROCm version; see docs/BC250.md."
+    # The script exits 0 whether or not it produced a library, so its exit code
+    # is not evidence of anything. The artefact check below is.
+    sh "$script" || true
 fi
 
 head_ "Checking the artefacts"
 if [ "$BC250_DRY_RUN" != "1" ]; then
     count=$(find "$BUILD/Tensile/library" -name '*gfx1013*' 2>/dev/null | wc -l)
-    [ "$count" -gt 0 ] || refuse "the build produced no gfx1013 code objects" \
-        "Without them this stage has done nothing; do not install it."
-    ok "$count gfx1013 Tensile libraries"
+    info "$count gfx1013 Tensile code objects"
+    if [ -z "$(librocblas)" ]; then
+        say ""
+        say "  The Tensile kernels were generated but rocBLAS itself did not link."
+        say "  If the log above ends at 'Failed to verify all files in manifest',"
+        say "  this is the known stopping point, and it is not something re-running"
+        say "  fixes: step 4 of the upstream script only *prints* what to do. The"
+        say "  gfx1013 entries it asks for — SupportedISA and AsmCaps in the Tensile"
+        say "  copy under build/release/virtualenv, the Processor and"
+        say "  LazyLoadingInit enums, and the deviceString branches in rocBLAS —"
+        say "  have to be made by hand, and the reference repo does not write them"
+        say "  down. Its own note says so."
+        say ""
+        say "  This stage is OPTIONAL. rocBLAS is the GEMM library: it governs"
+        say "  matmul speed, not whether training works. The kernels that block"
+        say "  training are torch's own, and those come from the next stage."
+        say ""
+        say "  To carry on without it:"
+        say "      scripts/bc250/build.sh --skip rocblas"
+        say "      scripts/bc250/build.sh"
+        say ""
+        refuse "no librocblas.so was produced" \
+            "Nothing has been installed. Skip this stage and build torch, which is the one that matters."
+    fi
+    ok "librocblas.so: $(librocblas)"
 fi
 
 head_ "Installing to $PREFIX"
 run_root mkdir -p "$PREFIX/lib/rocblas/library"
 if [ "$BC250_DRY_RUN" != "1" ]; then
+    copied=0
     for so in "$BUILD"/library/src/librocblas.so*; do
         [ -e "$so" ] || continue
         run_root cp -a "$so" "$PREFIX/lib/"
+        copied=$((copied + 1))
     done
+    [ "$copied" -gt 0 ] || die "no library was copied; refusing to claim success"
     run_root cp -a "$BUILD/Tensile/library/." "$PREFIX/lib/rocblas/library/"
+    ok "installed $copied library file(s) and the Tensile code objects"
 fi
-ok "installed"
 
 # rocBLAS finds its Tensile libraries through ROCBLAS_TENSILE_LIBPATH, and the
 # loader finds the patched library through LD_LIBRARY_PATH. Both are read by

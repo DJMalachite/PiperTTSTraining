@@ -8,6 +8,7 @@
 #   scripts/bc250/build.sh --force ...     re-run stages already marked done
 #   scripts/bc250/build.sh --reset torch   delete one stage's artefacts, then stop
 #   scripts/bc250/build.sh --reset all     delete every stage's artefacts
+#   scripts/bc250/build.sh --skip rocblas  mark the optional stage skipped
 #   scripts/bc250/build.sh --dry-run       print every command, change nothing
 #   scripts/bc250/build.sh --yes           do not ask before root commands
 #
@@ -150,6 +151,7 @@ reset_stage() {
 only=""
 from=""
 reset=""
+skip=""
 force=0
 
 while [ $# -gt 0 ]; do
@@ -158,11 +160,15 @@ while [ $# -gt 0 ]; do
             reset=${2:?--reset needs a stage name, or 'all'}
             shift 2
             ;;
+        --skip)
+            skip=${2:?--skip needs a stage name}
+            shift 2
+            ;;
         --list)
             printf '%-11s %-5s %s\n' STAGE WHERE STATE
             for name in $(stage_names); do
                 state=pending
-                stage_done "$name" && state="done  $(cat "$BC250_STATE/done-$name")"
+                stage_done "$name" && state=$(cat "$BC250_STATE/done-$name")
                 printf '%-11s %-5s %s\n' "$name" "$(stage_where "$name")" "$state"
             done
             exit 0
@@ -190,6 +196,20 @@ done
 if [ -n "$reset" ] && [ "$reset" != "all" ] && [ -z "$(stage_where "$reset")" ]; then
     refuse "unknown stage: $reset" \
         "Known stages: $(stage_names | tr '\n' ' ') (or 'all')"
+fi
+if [ -n "$skip" ]; then
+    [ -n "$(stage_where "$skip")" ] ||
+        refuse "unknown stage: $skip" "Known stages: $(stage_names | tr '\n' ' ')"
+    case "$skip" in
+        rocblas) ;;
+        *)
+            refuse "'$skip' cannot be skipped" \
+                "Only 'rocblas' is optional: it governs matmul speed, not whether training works. Every other stage is a prerequisite for the ones after it."
+            ;;
+    esac
+    mark_skipped "$skip"
+    say "-- $skip: marked skipped; scripts/bc250/build.sh will move past it"
+    exit 0
 fi
 
 container_name=$(pin container_name)

@@ -125,7 +125,17 @@ stage_done() {
 
 mark_done() {
     mkdir -p "$BC250_STATE"
-    date -u '+%Y-%m-%dT%H:%M:%SZ' >"$BC250_STATE/done-$1"
+    printf 'done     %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        >"$BC250_STATE/done-$1"
+}
+
+# Skipping is recorded distinctly from finishing. Stage 4 is genuinely optional
+# — rocBLAS governs matmul speed, not whether training works — and a build that
+# skipped it should say so rather than claim it was done.
+mark_skipped() {
+    mkdir -p "$BC250_STATE"
+    printf 'skipped  %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        >"$BC250_STATE/done-$1"
 }
 
 clear_done() {
