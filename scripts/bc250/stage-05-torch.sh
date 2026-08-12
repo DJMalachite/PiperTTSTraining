@@ -45,29 +45,51 @@ if [ -n "$existing" ]; then
 fi
 
 # --------------------------------------------------------------------------
-# Job count, from memory rather than cores
+# Job count
 # --------------------------------------------------------------------------
 #
-# The BC-250 has 16 GB shared between CPU and GPU and torch's C++ link steps are
-# the memory peak, not the compiles. Sizing by nproc is how this build gets
-# OOM-killed six hours in.
+# Every core by default. The thing to know is that memory, not cores, is what
+# actually ends this build: torch's C++ link steps are the peak, and on a BC-250
+# the GPU has already taken half of the 16 GB, so a machine with 16 threads may
+# have well under a gigabyte of headroom per job. An OOM-killed link three hours
+# in loses those three hours.
+#
+# So: use the cores, measure the budget, and say plainly when the two do not
+# agree. --jobs (or BC250_MAX_JOBS) overrides in either direction.
 
 mem_gib=$(awk '/^MemTotal:/ {printf "%d", $2/1024/1024}' /proc/meminfo || echo 8)
 [ -n "$mem_gib" ] || mem_gib=8
-cores=$(nproc)
-jobs=$((mem_gib / 2))
-[ "$jobs" -lt 1 ] && jobs=1
-[ "$jobs" -gt "$cores" ] && jobs="$cores"
-info "${mem_gib} GiB RAM, ${cores} cores -> MAX_JOBS=$jobs"
-
 swap_gib=$(awk '/^SwapTotal:/ {printf "%d", $2/1024/1024}' /proc/meminfo || echo 0)
 [ -n "$swap_gib" ] || swap_gib=0
-if [ "$swap_gib" -lt 8 ]; then
-    warn "only ${swap_gib} GiB of swap"
-    info "A link step that runs out of memory kills the build after hours of"
-    info "work. Consider 'sudo systemd-run --scope swapon' on a file of 16 GiB"
-    info "on the host before continuing."
-    confirm "continue anyway?" || refuse "stopped" "Add swap and re-run this stage."
+cores=$(nproc)
+
+jobs=${BC250_MAX_JOBS:-$cores}
+case "$jobs" in
+    '' | *[!0-9]*) refuse "--jobs must be a number (got '$jobs')" "e.g. --jobs 8" ;;
+esac
+[ "$jobs" -ge 1 ] || jobs=1
+
+budget=$((mem_gib + swap_gib))
+# Roughly 1.5 GiB per parallel job at the peak, which is where torch's larger
+# translation units and the final links sit.
+want=$((jobs * 3 / 2))
+info "${cores} cores, ${mem_gib} GiB RAM + ${swap_gib} GiB swap -> MAX_JOBS=$jobs"
+
+if [ "$budget" -lt "$want" ]; then
+    say ""
+    warn "${jobs} jobs wants about ${want} GiB at peak; this machine has ${budget} GiB"
+    info "The failure mode is the OOM killer taking a link step after hours of"
+    info "compiling, not a slow build. Two ways to keep all ${cores} threads:"
+    info ""
+    info "  add swap on the host (it is only touched at the peak):"
+    info "    sudo fallocate -l 16G /swapfile && sudo chmod 600 /swapfile"
+    info "    sudo mkswap /swapfile && sudo swapon /swapfile"
+    info ""
+    info "  or build with fewer jobs:"
+    info "    scripts/bc250/build.sh --stage torch --jobs $((budget * 2 / 3))"
+    say ""
+    confirm "continue with ${jobs} jobs?" ||
+        refuse "stopped" "Add swap or pass --jobs, then re-run this stage."
 fi
 
 # --------------------------------------------------------------------------

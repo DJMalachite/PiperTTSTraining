@@ -9,6 +9,7 @@
 #   scripts/bc250/build.sh --reset torch   delete one stage's artefacts, then stop
 #   scripts/bc250/build.sh --reset all     delete every stage's artefacts
 #   scripts/bc250/build.sh --skip rocblas  mark the optional stage skipped
+#   scripts/bc250/build.sh --jobs 8        build with N parallel jobs (default: all cores)
 #   scripts/bc250/build.sh --dry-run       print every command, change nothing
 #   scripts/bc250/build.sh --yes           do not ask before root commands
 #
@@ -181,6 +182,11 @@ while [ $# -gt 0 ]; do
             from=${2:?--from needs a stage name}
             shift 2
             ;;
+        --jobs)
+            BC250_MAX_JOBS=${2:?--jobs needs a number}
+            export BC250_MAX_JOBS
+            shift 2
+            ;;
         --force) force=1; shift ;;
         --dry-run) BC250_DRY_RUN=1; export BC250_DRY_RUN; shift ;;
         --yes) BC250_YES=1; export BC250_YES; shift ;;
@@ -246,6 +252,7 @@ enter_box() {
     say "  entering the '$container_name' container"
     distrobox enter "$container_name" -- \
         env BC250_DRY_RUN="$BC250_DRY_RUN" BC250_YES="$BC250_YES" \
+        BC250_MAX_JOBS="${BC250_MAX_JOBS:-}" \
         sh "$BC250_REPO/scripts/bc250/$file"
 }
 
