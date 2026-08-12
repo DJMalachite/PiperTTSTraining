@@ -57,21 +57,44 @@ else
     sh "$script" || true
 fi
 
+# --------------------------------------------------------------------------
+# Second pass: the gfx1013 edits upstream only prints
+# --------------------------------------------------------------------------
+#
+# rocBLAS fetches its own Tensile into build/release/virtualenv at configure
+# time, and that copy knows nothing about gfx1013, so no assembly kernels are
+# generated and the manifest verify fails. The upstream script's step 4 says to
+# fix that by hand and then only echoes the instruction. tensile-gfx1013.py is
+# that step. It can only run after the first configure has created the
+# virtualenv, which is why this is a second pass rather than a prerequisite.
+
+if [ "$BC250_DRY_RUN" != "1" ] && [ -z "$(librocblas)" ]; then
+    head_ "Adding gfx1013 to the Tensile rocBLAS fetched for itself"
+    say "  The first pass was expected to stop at the manifest verify: the"
+    say "  fetched Tensile has no gfx1013 in SupportedISA, so it generated no"
+    say "  assembly kernels and the manifest asked for files nobody made."
+    say ""
+    python3 "$BC250_REPO/scripts/bc250/tensile-gfx1013.py" "$BUILD" ||
+        refuse "could not patch Tensile for gfx1013" \
+            "The reason is above. Skip this stage with 'scripts/bc250/build.sh --skip rocblas' — it governs matmul speed, not whether training works."
+
+    head_ "Rebuilding with gfx1013 known"
+    runcmd make -C "$BUILD" -j"$(nproc)" install || true
+fi
+
 head_ "Checking the artefacts"
 if [ "$BC250_DRY_RUN" != "1" ]; then
     count=$(find "$BUILD/Tensile/library" -name '*gfx1013*' 2>/dev/null | wc -l)
     info "$count gfx1013 Tensile code objects"
     if [ -z "$(librocblas)" ]; then
         say ""
-        say "  The Tensile kernels were generated but rocBLAS itself did not link."
-        say "  If the log above ends at 'Failed to verify all files in manifest',"
-        say "  this is the known stopping point, and it is not something re-running"
-        say "  fixes: step 4 of the upstream script only *prints* what to do. The"
-        say "  gfx1013 entries it asks for — SupportedISA and AsmCaps in the Tensile"
-        say "  copy under build/release/virtualenv, the Processor and"
-        say "  LazyLoadingInit enums, and the deviceString branches in rocBLAS —"
-        say "  have to be made by hand, and the reference repo does not write them"
-        say "  down. Its own note says so."
+        say "  Still no library after the Tensile patch. The Python side is done,"
+        say "  so what remains is the C++ side the upstream note also lists: the"
+        say "  Processor enum in AMDGPU.hpp, LazyLoadingInit in"
+        say "  PlaceholderLibrary.hpp, and the gfx1013 enum and deviceString"
+        say "  branches in rocBLAS's handle.hpp, handle.cpp and tensile_host.cpp."
+        say "  Read the error above to see which of those it is actually asking"
+        say "  for — it is worth knowing before editing six files."
         say ""
         say "  This stage is OPTIONAL. rocBLAS is the GEMM library: it governs"
         say "  matmul speed, not whether training works. The kernels that block"
@@ -82,7 +105,7 @@ if [ "$BC250_DRY_RUN" != "1" ]; then
         say "      scripts/bc250/build.sh"
         say ""
         refuse "no librocblas.so was produced" \
-            "Nothing has been installed. Skip this stage and build torch, which is the one that matters."
+            "Nothing has been installed. Skipping costs matmul throughput, not correctness."
     fi
     ok "librocblas.so: $(librocblas)"
 fi
