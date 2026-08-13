@@ -1,25 +1,26 @@
 # PiperTTSTraining
 
 Train a [Piper](https://github.com/OHF-Voice/piper1-gpl) text-to-speech voice
-from **one long audio recording**, on Linux, on either an NVIDIA or an AMD GPU.
+from **one long audio recording**, on Linux or Windows, on an NVIDIA or AMD GPU
+or on CPU.
 
 You point it at a recording. It splits the audio at word boundaries, transcribes
 it, writes a Piper-format dataset, reports what looks wrong, then configures and
 runs training — with every setting available in a terminal wizard and saved to a
 YAML profile you can edit and re-run.
 
-The core is generic — CUDA, ROCm and CPU are all first-class, and the GPU is
-detected and verified during setup. Hardware that needs special handling gets an
-opt-in profile on top; `bc250` is the one that ships.
+The core is vendor-neutral: CUDA, ROCm and CPU are all first-class, and the GPU
+is detected and *verified* during setup — not just reported, but proven with a
+real matmul and a real autograd loop, because `torch.cuda.is_available()` lies
+on unsupported ROCm targets.
 
-> **BC-250 owners, read [docs/BC250.md](docs/BC250.md) first.** With a stock
-> ROCm wheel, **GPU training is blocked** on that board — torch's kernels are
-> compiled ahead of time per architecture and no published wheel includes
-> gfx1013, so autograd raises `invalid device function` while matmul keeps
-> working. Dataset preparation, export and CPU training all work regardless.
-> `scripts/bc250/build.sh` builds a torch that does carry those kernels; whether
-> that is sufficient is unproven, and `./run doctor` measures your specific board
-> rather than taking anything on faith.
+AMD works on both platforms, by two different routes. On Linux, ROCm comes from
+download.pytorch.org like any other wheel. On Windows, AMD publishes its own
+ROCm build at fixed URLs on `repo.radeon.com`, which brings three requirements
+setup checks for you: **Python 3.12 exactly** (the wheels are cp312-only), a
+recent AMD graphics driver, and a GPU on
+[AMD's supported list](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html).
+NVIDIA and CPU are the same story everywhere.
 
 ## Quickstart
 
@@ -29,8 +30,12 @@ cd PiperTTSTraining
 ./setup
 ```
 
-If `./setup` reports "permission denied", the executable bit did not survive the
-trip (this repo is authored on Windows). Either fix it once:
+On **Windows**, the same thing — `.\setup` in PowerShell, or `setup` in cmd.exe.
+PowerShell resolves `./run` to `run.cmd`, so every `./run ...` command in this
+documentation works there verbatim.
+
+On **Linux**, if `./setup` reports "permission denied", the executable bit did
+not survive the trip. Either fix it once:
 
 ```bash
 chmod +x run setup scripts/*.sh
@@ -65,10 +70,14 @@ Then:
 
 ## What you need
 
-- **Linux.** The training path builds espeak-ng from source and needs a POSIX
-  toolchain. On Windows, use WSL2.
-- **Python 3.11+**, `git`, `ffmpeg`, and a C/C++ compiler. `./run setup` offers
-  to install the system packages for `pacman`, `apt-get`, `dnf` or `zypper`.
+- **Linux or Windows.** Training builds espeak-ng and two extension modules
+  from source, so it needs a working C/C++ toolchain either way.
+- **Python 3.11+**, `git`, `ffmpeg`, and a compiler. `./run setup` offers to
+  install the system packages for `pacman`, `apt-get`, `dnf` or `zypper` on
+  Linux, and via `winget` on Windows. The MSVC build tools are the one thing it
+  will not install for you — it prints the exact command, because getting the
+  workload selection wrong leaves a Visual Studio that looks installed and
+  cannot compile.
 - **About 20 GB of disk.** torch unpacks to ~4 GB, a pretrained checkpoint is
   ~0.9 GB, and a training run keeps around 10 GB of checkpoints by default.
 - **A recording.** Anything ffmpeg can read, including video. 30 minutes of
@@ -87,14 +96,11 @@ happy.
 ## Profiles
 
 Every setting lives in `profiles/<voice>.yaml`, generated with its own
-documentation inline. Two commented examples ship with the repo:
+documentation inline. A commented example ships with the repo:
 
 - [`profiles/example-en_US-medium.yaml`](profiles/example-en_US-medium.yaml) —
   the defaults, annotated.
-- [`profiles/example-bc250-lowvram.yaml`](profiles/example-bc250-lowvram.yaml) —
-  the small-GPU variant, including the `gfx1013` environment override.
-
-Copy one to `profiles/<yourvoice>.yaml`, or just run the wizard and let it write
+Copy it to `profiles/<yourvoice>.yaml`, or just run the wizard and let it write
 the file.
 
 ## Documentation
@@ -102,8 +108,7 @@ the file.
 | | |
 | --- | --- |
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | The six commands, no theory |
-| [docs/GPU_SETUP.md](docs/GPU_SETUP.md) | NVIDIA / AMD / CPU, and how the GPU is verified |
-| [docs/BC250.md](docs/BC250.md) | The AMD BC-250 (gfx1013): what works, what does not, why, and how to build a torch that might |
+| [docs/GPU_SETUP.md](docs/GPU_SETUP.md) | NVIDIA / AMD / CPU, Linux and Windows, and how the GPU is verified |
 | [docs/DATASET.md](docs/DATASET.md) | What good source audio is; every dataset setting |
 | [docs/TRAINING.md](docs/TRAINING.md) | Profile → piper flag mapping; presets; fine-tuning |
 | [docs/EXPORT.md](docs/EXPORT.md) | The two-file voice format and how to use it |
@@ -119,8 +124,9 @@ quirks live on this side of the boundary, documented in
 [docs/UPSTREAM_NOTES.md](docs/UPSTREAM_NOTES.md). Bumping the pin in
 [`pins.toml`](pins.toml) means re-running the checklist in that file.
 
-It is also not a hosted or web interface. Everything is a terminal program, so
-it works over SSH on a headless machine.
+It is also not a hosted or web interface. Everything is a terminal program with
+line-based prompts and no curses, so it works over SSH, in tmux, and with piped
+stdin on a headless machine.
 
 ## Related repositories
 

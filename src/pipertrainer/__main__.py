@@ -378,6 +378,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    from . import env as env_mod
+    from . import paths
+
+    problem = paths.env_name_problem()
+    if problem:
+        raise ValueError(problem)
+
+    # Environment that setup discovered for this machine (e.g. a working
+    # HSA_OVERRIDE_GFX_VERSION). Applied here rather than by the entry-point
+    # script, because a shell fragment only one of the two platforms can source
+    # is not a place to keep facts both of them need.
+    env_mod.apply_persisted_env()
+
     if not args.command:
         from . import menu
 

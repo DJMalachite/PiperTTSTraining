@@ -1,6 +1,8 @@
 # Quickstart
 
-Six commands, no theory. Everything here assumes Linux and one audio file.
+Six commands, no theory. Everything here assumes one audio file. The commands
+are identical on Linux and Windows — PowerShell resolves `./run` to `run.cmd`,
+and in cmd.exe you drop the `./`.
 
 ## 1. Install
 
@@ -10,8 +12,9 @@ Six commands, no theory. Everything here assumes Linux and one audio file.
 
 Detects your GPU, installs the matching torch wheel, clones and builds
 `piper1-gpl` at a pinned tag, installs Whisper, and verifies the lot with a real
-GPU matmul. It offers to install system packages first and shows you the exact
-command before running it.
+GPU matmul and a real autograd loop. It offers to install system packages first
+(`pacman`/`apt-get`/`dnf`/`zypper` on Linux, `winget` on Windows) and shows you
+the exact command before running it.
 
 Takes 10–25 minutes, mostly building espeak-ng from source.
 

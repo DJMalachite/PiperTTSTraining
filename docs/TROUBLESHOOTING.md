@@ -67,11 +67,10 @@ at the first real kernel launch — often `SIGABRT`, sometimes
 ./run doctor
 ```
 
-If the matmul check fails, see [GPU_SETUP.md](GPU_SETUP.md). On a **BC-250
-(gfx1013)** neither of the usual moves helps: `HSA_OVERRIDE_GFX_VERSION` makes
-things worse, and no stock ROCm wheel of any version ships gfx1013 kernels, so
-re-downloading torch from another index costs gigabytes and fails identically.
-See [BC250.md](BC250.md) instead. On any other card, try a different ROCm build:
+If the matmul check fails, see [GPU_SETUP.md](GPU_SETUP.md). On Windows with an
+AMD card there is only one published ROCm build, so there is no index to swap —
+check the driver version and whether your GPU is on AMD's supported list. On
+Linux, try a different ROCm build:
 
 ```bash
 ./run setup --force-step torch --force-step constraint --torch-index https://download.pytorch.org/whl/rocm6.3 --torch-spec torch==2.6.0
@@ -91,16 +90,17 @@ can confirm it in ten seconds rather than an hour.
 torch was compiled for your device at all — that line names the cause directly:
 
 ```
-[warn] torch gfx kernels   this torch has no gfx1013 code (built for gfx900, ..., gfx1201)
+[fail] torch gfx kernels   this torch has no gfx1010 code (built for gfx900, ..., gfx1201)
 ```
 
-On a BC-250 with a stock wheel this is the documented state of the board and is
-reported as a warning rather than an error; see [BC250.md](BC250.md) for the
-options (prepare the dataset there and train elsewhere, train on CPU, or build a
-torch for gfx1013 with `scripts/bc250/build.sh`). If that build has already
-happened and the probe *still* fails, doctor escalates it to an error, because
-the documented cause has been ruled out. On any other GPU, try a different ROCm
-index — see [GPU_SETUP.md](GPU_SETUP.md).
+The fix is a torch built for your architecture. On Linux, try a different ROCm
+index — see [GPU_SETUP.md](GPU_SETUP.md). On Windows there is one published ROCm
+build, so the question is instead whether the card is on AMD's supported list
+and whether the graphics driver is recent enough.
+
+If nothing lists your target, the working options are to prepare the dataset on
+this machine and train elsewhere, or to train on CPU. Everything except the
+training step runs at full speed regardless.
 
 ## The GPU worked, and now it does not
 

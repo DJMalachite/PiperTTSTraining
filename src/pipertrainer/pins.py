@@ -34,43 +34,51 @@ def _load_toml(path) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class TorchPin:
-    """One (index-url, spec) pair. See pins.toml on why --index-url."""
+    """How to install torch for one vendor on one platform.
 
-    index: str
-    spec: str
+    Two delivery mechanisms, because vendors do not agree on one:
+
+    * ``index`` + ``spec`` — a package index that replaces PyPI for this
+      install. What download.pytorch.org offers, and the common case.
+    * ``wheels`` — explicit wheel URLs, installed as files. AMD publishes the
+      native-Windows ROCm build this way, and there is no index to point at.
+
+    ``prerequisites`` are installed first and separately: the Windows ROCm
+    runtime is itself a set of wheels that torch links against.
+    """
+
+    index: str = ""
+    spec: str = ""
+    wheels: tuple[str, ...] = ()
+    prerequisites: tuple[str, ...] = ()
+    #: Exact ``major.minor`` this delivery is built for, when only one exists.
+    requires_python: str = ""
+    #: Minimum GPU driver version, reported rather than enforced.
+    driver: str = ""
+    #: Vendor documentation for this particular path.
+    docs: str = ""
+
+    @property
+    def from_urls(self) -> bool:
+        """Whether this pin installs wheel files rather than resolving a name."""
+        return bool(self.wheels)
 
     @property
     def version(self) -> str:
         """`torch==2.9.1` -> `2.9.1`."""
+        if self.from_urls:
+            # torch-2.9.1%2Brocm7.2.1-cp312-...whl -> 2.9.1+rocm7.2.1
+            name = self.wheels[0].rsplit("/", 1)[-1].replace("%2B", "+")
+            parts = name.split("-")
+            return parts[1] if len(parts) > 1 else name
         return self.spec.partition("==")[2] or self.spec
 
-
-@dataclass(frozen=True)
-class BC250Pins:
-    """Everything ``scripts/bc250/build.sh`` fetches or builds.
-
-    Read by the shell driver through ``--print-pin``, so that the scripts and
-    this file cannot disagree about which commit of somebody else's kernel
-    patch we are applying.
-    """
-
-    reference_repo: str
-    reference_sha: str
-    cu_unlock_repo: str
-    cu_unlock_sha: str
-    container_image: str
-    container_name: str
-    container_python: str
-    torch_repo: str
-    torch_tag: str
-    torch_local_version: str
-    gfx_target: str
-    build_free_gib: int
-
     @property
-    def torch_version(self) -> str:
-        """``v2.9.1`` + ``rocm6.4.gfx1013`` -> ``2.9.1+rocm6.4.gfx1013``."""
-        return f"{self.torch_tag.lstrip('v')}+{self.torch_local_version}"
+    def describe(self) -> str:
+        if self.from_urls:
+            host = self.wheels[0].split("/")[2]
+            return f"torch {self.version} from {host}"
+        return f"{self.spec} from {self.index}"
 
 
 @dataclass(frozen=True)
@@ -100,8 +108,17 @@ class Pins:
         return tuple(int(p) for p in str(self.raw["python"]["min"]).split("."))
 
     @property
-    def python_prefer(self) -> list[str]:
-        return list(self.raw["python"]["prefer"])
+    def python_prefer(self) -> list[list[str]]:
+        """Candidate interpreters to probe, as argv lists, best first.
+
+        Argv rather than a bare name because Windows has no versioned
+        interpreter on PATH: ``py -3.13`` is how you ask for one, and that is
+        two arguments. ``prefer_windows`` is optional so an older pins.toml
+        still loads on Linux.
+        """
+        entry = self.raw["python"]
+        key = "prefer_windows" if sys.platform == "win32" else "prefer"
+        return [list(candidate) for candidate in entry.get(key, entry["prefer"])]
 
     # --- build backend ----------------------------------------------------
     @property
@@ -126,14 +143,38 @@ class Pins:
 
     # --- torch ------------------------------------------------------------
     def torch(self, vendor: str) -> TorchPin:
+        """The pin for ``vendor`` on the running platform.
+
+        A vendor may need a different delivery per platform — ROCm does, since
+        AMD ships native-Windows wheels from their own repository rather than
+        through download.pytorch.org. A ``[torch.<vendor>.windows]`` sub-table
+        overrides the vendor default there.
+        """
         try:
             entry = self.raw["torch"][vendor]
         except KeyError as exc:
             raise PinsError(f"unknown vendor {vendor!r} in pins.toml") from exc
+
+        override = entry.get("windows") if sys.platform == "win32" else None
+        if override:
+            return TorchPin(
+                index=str(override.get("index", "")),
+                spec=str(override.get("spec", "")),
+                wheels=tuple(override.get("wheels", ())),
+                prerequisites=tuple(override.get("prerequisites", ())),
+                requires_python=str(override.get("requires_python", "")),
+                driver=str(override.get("driver", "")),
+                docs=str(override.get("docs", "")),
+            )
         return TorchPin(index=entry["index"], spec=entry["spec"])
 
     def torch_alternatives(self, vendor: str) -> list[TorchPin]:
         entry = self.raw["torch"].get(vendor, {})
+        if sys.platform == "win32" and entry.get("windows"):
+            # The Windows delivery is a single published set, not a menu of
+            # ROCm versions to try. Offering the Linux indexes here would send
+            # someone after wheels that do not exist for their platform.
+            return []
         return [
             TorchPin(index=alt["index"], spec=alt["spec"])
             for alt in entry.get("alternatives", [])
@@ -155,27 +196,6 @@ class Pins:
     @property
     def checkpoint_repo(self) -> str:
         return self.raw["checkpoints"]["repo"]
-
-    # --- bc250 ------------------------------------------------------------
-    @property
-    def bc250(self) -> BC250Pins:
-        try:
-            entry = self.raw["bc250"]
-        except KeyError as exc:
-            raise PinsError("pins.toml has no [bc250] section") from exc
-        fields = BC250Pins.__dataclass_fields__
-        missing = sorted(name for name in fields if name not in entry)
-        if missing:
-            raise PinsError(
-                f"[bc250] in pins.toml is missing: {', '.join(missing)}"
-            )
-        # `from __future__ import annotations` makes field types strings.
-        return BC250Pins(
-            **{
-                name: int(entry[name]) if spec.type in (int, "int") else str(entry[name])
-                for name, spec in fields.items()
-            }
-        )
 
     # --- disk -------------------------------------------------------------
     @property

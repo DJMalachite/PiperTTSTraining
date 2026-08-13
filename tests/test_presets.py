@@ -2,7 +2,7 @@
 
 The upsample/hop invariant is the one upstream enforces with a bare
 ``ValueError("Upsample rates do not match hop length")``, so every preset is
-checked against it here rather than at 3am on a BC-250.
+checked against it here rather than an hour into a run.
 """
 
 from __future__ import annotations

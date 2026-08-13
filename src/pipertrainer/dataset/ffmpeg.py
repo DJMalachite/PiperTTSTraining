@@ -22,6 +22,7 @@ import json
 import math
 import shutil
 import struct
+import sys
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,12 +61,21 @@ class AudioInfo:
 
 def require_ffmpeg() -> None:
     missing = [name for name in ("ffmpeg", "ffprobe") if not shutil.which(name)]
-    if missing:
-        raise AudioError(
-            f"{' and '.join(missing)} not found on PATH. Install ffmpeg: "
-            f"'sudo pacman -S ffmpeg' on Arch/CachyOS, "
-            f"'sudo apt-get install ffmpeg' on Debian."
+    if not missing:
+        return
+    if sys.platform == "win32":
+        how = (
+            "'winget install Gyan.FFmpeg', then open a new terminal so the "
+            "PATH change takes effect"
         )
+    else:
+        how = (
+            "'sudo pacman -S ffmpeg' on Arch/CachyOS, "
+            "'sudo apt-get install ffmpeg' on Debian"
+        )
+    raise AudioError(
+        f"{' and '.join(missing)} not found on PATH. Install ffmpeg: {how}."
+    )
 
 
 def probe(path: Path) -> AudioInfo:

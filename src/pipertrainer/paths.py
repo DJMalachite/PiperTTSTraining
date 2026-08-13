@@ -13,8 +13,16 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+#: Windows puts venv executables in ``Scripts`` with an ``.exe`` suffix; every
+#: other platform uses ``bin`` and no suffix. Derived once here so no caller
+#: has to know, and so ``venv_bin`` is the only place that spells it.
+WINDOWS = sys.platform == "win32"
+VENV_BINDIR = "Scripts" if WINDOWS else "bin"
+EXE_SUFFIX = ".exe" if WINDOWS else ""
 
 # src/pipertrainer/paths.py -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -29,19 +37,41 @@ def slug(name: str) -> str:
 
 
 def env_suffix() -> str:
-    """``PIPERTRAINER_ENV=bc250`` -> ``-bc250``; unset -> ``""``.
+    """``PIPERTRAINER_ENV=cuda`` -> ``-cuda``; unset -> ``""``.
 
-    One repo can need more than one installed environment. The BC-250 builds a
-    gfx1013 torch inside a Fedora container that shares ``$HOME`` with the host
-    (see docs/BC250.md), and a venv built there must not collide with the
-    host's — different distribution, different libc, different torch. Naming
-    the environment gives each its own ``.venv-<name>`` and ``.state-<name>``.
+    One clone can need more than one installed environment: a checkout on a
+    drive shared between Windows and WSL2 cannot use the same ``.venv`` from
+    both, because the interpreters, the extension suffixes and the torch build
+    all differ. Naming the environment gives each its own ``.venv-<name>`` and
+    ``.state-<name>``.
 
     Unset is the overwhelmingly common case and must keep the historic layout
     byte for byte, so that existing clones see no change at all.
     """
     name = os.environ.get("PIPERTRAINER_ENV", "").strip()
     return f"-{slug(name)}" if name else ""
+
+
+_ENV_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$|^[A-Za-z0-9]$")
+
+
+def env_name_problem() -> str | None:
+    """Why ``PIPERTRAINER_ENV`` is unusable, or None if it is fine.
+
+    Refused rather than sanitised: ``env_suffix`` runs the name through the
+    same slug the voice names use, so a name this accepts is one slug leaves
+    alone — which is what keeps the entry-point script and this module agreeing
+    on which directory to look in. The POSIX ``run`` makes the same check
+    earlier; this is what gives ``run.cmd`` the identical message without
+    reimplementing the rule in batch.
+    """
+    name = os.environ.get("PIPERTRAINER_ENV", "").strip()
+    if not name or _ENV_NAME.match(name):
+        return None
+    return (
+        f"PIPERTRAINER_ENV must start and end with a letter or digit and "
+        f"contain only letters, digits, '.', '_' and '-' (got: {name!r})"
+    )
 
 
 PINS_FILE = REPO_ROOT / "pins.toml"
@@ -56,17 +86,27 @@ VOICES_DIR = REPO_ROOT / "voices"
 DOCS_DIR = REPO_ROOT / "docs"
 
 SETUP_STATE = STATE_DIR / "setup.json"
-ENV_SH = STATE_DIR / "env.sh"
+#: Environment discovered by setup (e.g. HSA_OVERRIDE_GFX_VERSION), as JSON so
+#: it can be read the same way on every platform. It used to be a shell
+#: fragment that ``./run`` sourced, which no Windows entry point could do.
+ENV_JSON = STATE_DIR / "env.json"
 TORCH_CONSTRAINT = STATE_DIR / "torch-constraint.txt"
 ACTIVE_PROFILE = STATE_DIR / "active-profile"
 
-def venv_python() -> Path:
-    """Interpreter inside the project venv (may not exist before setup)."""
-    return VENV_DIR / "bin" / "python"
-
 
 def venv_bin(name: str) -> Path:
-    return VENV_DIR / "bin" / name
+    """An executable inside the project venv, spelled for this platform."""
+    return VENV_DIR / VENV_BINDIR / (name + EXE_SUFFIX)
+
+
+def venv_python() -> Path:
+    """Interpreter inside the project venv (may not exist before setup)."""
+    return venv_bin("python")
+
+
+def venv_bindir() -> Path:
+    """The venv's executable directory, for prepending to ``PATH``."""
+    return VENV_DIR / VENV_BINDIR
 
 
 def in_venv() -> bool:

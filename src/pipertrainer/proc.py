@@ -56,7 +56,15 @@ class Result:
 
 
 def describe(argv: Sequence[str | Path]) -> str:
-    """Shell-quoted form of a command, for logs and error messages."""
+    """Quoted form of a command, for logs and error messages.
+
+    Quoted for the shell the user would actually paste it into. ``shlex.quote``
+    produces POSIX quoting, which on Windows would render ``C:\\Program
+    Files\\...`` as a single-quoted string that cmd.exe does not understand —
+    the recorded command has to be one you can re-run.
+    """
+    if sys.platform == "win32":
+        return subprocess.list2cmdline([str(part) for part in argv])
     return " ".join(shlex.quote(str(part)) for part in argv)
 
 

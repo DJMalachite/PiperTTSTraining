@@ -27,6 +27,7 @@ from . import env as env_mod
 from . import pins as pins_mod
 from . import proc, tui
 from .paths import (
+    ENV_JSON,
     PIPER_DIR,
     REPO_ROOT,
     STATE_DIR,
@@ -84,6 +85,64 @@ INSTALL_FLAGS: dict[str, list[str]] = {
     "zypper": ["install", "-y"],
 }
 
+# Windows equivalents: (winget id, the executable it puts on PATH, why).
+# The executable is listed rather than derived from the id so that a package
+# being renamed upstream cannot silently turn into a check for the wrong file.
+WINGET_PACKAGES: list[tuple[str, str, str]] = [
+    ("Git.Git", "git", "cloning piper1-gpl"),
+    ("Gyan.FFmpeg", "ffmpeg", "decoding and cutting audio"),
+    ("Kitware.CMake", "cmake", "building espeak-ng (3.26+)"),
+    ("Ninja-build.Ninja", "ninja", "the CMake generator"),
+]
+VS_BUILD_TOOLS = (
+    'winget install --id Microsoft.VisualStudio.2022.BuildTools '
+    '--override "--quiet --wait --add '
+    'Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'
+)
+
+COMPILER_LABEL = (
+    "the MSVC C++ build tools" if sys.platform == "win32"
+    else "a C compiler (cc/gcc/clang)"
+)
+
+#: Where the Visual Studio installer records what is installed. Asking vswhere
+#: is the supported way to find MSVC; looking for ``cl.exe`` on PATH only works
+#: inside a Developer Command Prompt, while CMake locates the toolchain by
+#: itself from an ordinary shell.
+_VSWHERE = (
+    Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+    / "Microsoft Visual Studio"
+    / "Installer"
+    / "vswhere.exe"
+)
+_VC_TOOLS = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+
+
+def find_compiler() -> str | None:
+    """A usable C/C++ toolchain, described for the user, or None."""
+    if sys.platform != "win32":
+        return next((n for n in ("cc", "gcc", "clang") if shutil.which(n)), None)
+
+    on_path = shutil.which("cl")
+    if on_path:
+        return on_path
+    if not _VSWHERE.is_file():
+        return None
+    result = proc.capture(
+        [
+            str(_VSWHERE),
+            "-latest",
+            "-products", "*",
+            "-requires", _VC_TOOLS,
+            "-property", "installationPath",
+        ],
+        timeout=60,
+    )
+    if not result.ok or not result.lines:
+        return None
+    path = result.lines[-1].strip()
+    return f"MSVC at {path}" if path else None
+
 NETWORK_HOSTS = [
     ("github.com", 443),
     ("pypi.org", 443),
@@ -99,7 +158,9 @@ class Context:
     vendor: str = "cpu"
     offline: bool = False
     assume_yes: bool = False
-    bootstrap_python: str = sys.executable
+    #: Argv of the interpreter used to create the venv. A list because Windows
+    #: selects a version with `py -3.13`.
+    bootstrap_python: list[str] = field(default_factory=lambda: [sys.executable])
     torch_index: str = ""
     torch_spec: str = ""
     notes: list[str] = field(default_factory=list)
@@ -149,50 +210,109 @@ def _reachable(host: str, port: int, timeout: float = 6.0) -> bool:
         return False
 
 
-def _pick_python(ctx: Context) -> str:
-    """Newest supported interpreter available, preferring the running one."""
+def _version_of(argv: Sequence[str]) -> tuple[int, ...] | None:
+    result = proc.capture(
+        [*argv, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+        timeout=30,
+    )
+    if not result.ok or not result.lines:
+        return None
+    try:
+        return tuple(int(p) for p in result.lines[-1].strip().split("."))
+    except ValueError:
+        return None
+
+
+def _pick_exact_python(ctx: Context, wanted: str) -> list[str]:
+    """Find one specific ``major.minor``, because only it has a wheel.
+
+    The native-Windows ROCm build is published as cp312 and nothing else, so
+    "newest available" is the wrong rule there — a 3.13 venv would fail at the
+    torch step with a bare "no matching distribution", which names neither the
+    cause nor the fix.
+    """
+    target = tuple(int(p) for p in wanted.split("."))
+    candidates: list[list[str]] = [[sys.executable], *ctx.pins.python_prefer]
+    if sys.platform == "win32":
+        candidates.insert(1, ["py", f"-{wanted}"])
+    else:
+        candidates.insert(1, [f"python{wanted}"])
+
+    for candidate in candidates:
+        found = shutil.which(candidate[0])
+        if not found:
+            continue
+        argv = [found, *candidate[1:]]
+        if _version_of(argv) == target:
+            return argv
+
+    how = (
+        f"winget install Python.Python.{wanted}"
+        if sys.platform == "win32"
+        else f"install python{wanted} with your package manager"
+    )
+    raise SetupError(
+        f"the {ctx.vendor} torch build for this platform is published for "
+        f"Python {wanted} only, and no Python {wanted} was found.\n"
+        f"  {how}\n"
+        f"Then re-run setup. If you would rather not install it, "
+        f"'./run setup --vendor cpu' works on any supported Python."
+    )
+
+
+def _pick_python(ctx: Context) -> list[str]:
+    """Newest supported interpreter available, preferring the running one.
+
+    Returns an argv, not a path: on Windows a specific version is selected as
+    ``py -3.13``, which is two arguments and cannot be collapsed to one.
+    """
+    exact = ctx.pins.torch(ctx.vendor).requires_python
+    if exact:
+        return _pick_exact_python(ctx, exact)
+
     minimum = ctx.pins.python_min
     if sys.version_info[: len(minimum)] >= minimum:
-        # Running under ./run with a good interpreter already.
+        # Running under the entry point with a good interpreter already.
         candidate_version = ".".join(str(p) for p in sys.version_info[:2])
         if sys.version_info[:2] <= (3, 13):
-            return sys.executable
+            return [sys.executable]
         ctx.warn(
             f"running on Python {candidate_version}; numba (needed by "
             f"openai-whisper) often lags new releases. Looking for 3.13 or older."
         )
     for candidate in ctx.pins.python_prefer:
-        found = shutil.which(candidate)
+        found = shutil.which(candidate[0])
         if not found:
             continue
-        result = proc.capture(
-            [found, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
-            timeout=30,
-        )
-        if not result.ok or not result.lines:
-            continue
-        parts = tuple(int(p) for p in result.lines[0].strip().split("."))
-        if parts >= minimum:
-            return found
+        argv = [found, *candidate[1:]]
+        parts = _version_of(argv)
+        if parts is not None and parts >= minimum:
+            return argv
     if sys.version_info[: len(minimum)] >= minimum:
-        return sys.executable
+        return [sys.executable]
+    tried = ", ".join(" ".join(c) for c in ctx.pins.python_prefer)
     raise SetupError(
         f"need Python {'.'.join(str(p) for p in minimum)} or newer; none found. "
-        f"Tried: {', '.join(ctx.pins.python_prefer)}"
+        f"Tried: {tried}"
     )
 
 
+SUPPORTED_PLATFORMS = ("linux", "win32", "darwin")
+
+
 def step_preflight(ctx: Context) -> None:
-    if not sys.platform.startswith("linux"):
+    if not sys.platform.startswith(SUPPORTED_PLATFORMS):
         raise SetupError(
-            f"this tool targets Linux; detected {sys.platform!r}. piper's "
-            f"training path needs a POSIX toolchain and builds espeak-ng from "
-            f"source. On Windows, use WSL2."
+            f"unsupported platform {sys.platform!r}. This tool is developed "
+            f"against Linux and Windows."
         )
 
     ctx.bootstrap_python = _pick_python(ctx)
-    version = proc.capture([ctx.bootstrap_python, "--version"], timeout=30)
-    tui.ok(f"python: {ctx.bootstrap_python} ({version.output.strip()})")
+    version = proc.capture([*ctx.bootstrap_python, "--version"], timeout=30)
+    tui.ok(
+        f"python: {proc.describe(ctx.bootstrap_python)} "
+        f"({version.output.strip()})"
+    )
     tui.ok(f"machine: {platform.platform()}")
 
     required = {
@@ -201,11 +321,9 @@ def step_preflight(ctx: Context) -> None:
         "ffprobe": "reading audio metadata",
     }
     missing = [name for name in required if not shutil.which(name)]
-    compiler = next(
-        (name for name in ("cc", "gcc", "clang") if shutil.which(name)), None
-    )
+    compiler = find_compiler()
     if compiler is None:
-        missing.append("a C compiler (cc/gcc/clang)")
+        missing.append(COMPILER_LABEL)
     else:
         tui.ok(f"compiler: {compiler}")
 
@@ -264,6 +382,10 @@ def detect_package_manager() -> str | None:
 
 
 def step_system_deps(ctx: Context) -> None:
+    if sys.platform == "win32":
+        _windows_system_deps(ctx)
+        return
+
     manager = detect_package_manager()
     if manager is None:
         tui.warn(
@@ -290,6 +412,67 @@ def step_system_deps(ctx: Context) -> None:
     tui.ok("system packages step finished")
 
 
+def _windows_system_deps(ctx: Context) -> None:
+    """Install what the piper build needs on Windows, via winget.
+
+    The MSVC build tools are deliberately never installed automatically: the
+    download is several gigabytes, it wants a reboot often enough to matter,
+    and getting the workload selection wrong leaves a Visual Studio that looks
+    installed and cannot compile. Printing the exact command is more use than
+    running the wrong one.
+    """
+    missing = [
+        (package, why)
+        for package, executable, why in WINGET_PACKAGES
+        if not shutil.which(executable)
+    ]
+
+    if find_compiler() is None:
+        tui.warn("no MSVC C++ toolchain found")
+        tui.info(
+            "  piper builds espeak-ng and two C extensions from source, so it "
+            "needs the Visual Studio C++ build tools. Install them with:"
+        )
+        tui.info("")
+        tui.info(f"    {VS_BUILD_TOOLS}")
+        tui.info("")
+        tui.hint(
+            "  the --override is what selects the C++ workload; without it "
+            "winget installs the launcher and no compiler. Re-run setup after."
+        )
+        ctx.note("the MSVC build tools were not installed by this tool")
+    else:
+        tui.ok(f"compiler: {find_compiler()}")
+
+    if not missing:
+        tui.ok("git, ffmpeg, cmake and ninja are present")
+        return
+
+    if not shutil.which("winget"):
+        tui.warn(
+            "winget is not available. Install these yourself and re-run: "
+            + ", ".join(package for package, _ in missing)
+        )
+        ctx.note("system packages were not installed by this tool")
+        return
+
+    for package, why in missing:
+        command = ["winget", "install", "--id", package, "-e", "--silent",
+                   "--accept-package-agreements", "--accept-source-agreements"]
+        tui.info(f"{package} — {why}")
+        tui.info("  " + proc.describe(command))
+        if not ctx.assume_yes and not tui.confirm("install it now?", default=True):
+            ctx.note(f"{package} was not installed by this tool")
+            continue
+        proc.run(command, log_path=ctx.log_path, check=False)
+
+    tui.ok("system packages step finished")
+    tui.hint(
+        "  winget updates PATH for new shells only — if a tool still looks "
+        "missing, open a new terminal and re-run setup."
+    )
+
+
 # --------------------------------------------------------------------------
 # Step 2: virtualenv
 # --------------------------------------------------------------------------
@@ -300,7 +483,7 @@ def step_venv(ctx: Context) -> None:
         tui.ok(f"venv already exists at {VENV_DIR}")
     else:
         proc.run(
-            [ctx.bootstrap_python, "-m", "venv", str(VENV_DIR)],
+            [*ctx.bootstrap_python, "-m", "venv", str(VENV_DIR)],
             log_path=ctx.log_path,
         )
         tui.ok(f"created {VENV_DIR}")
@@ -320,10 +503,10 @@ def step_venv(ctx: Context) -> None:
 def local_wheel(spec: str) -> Path | None:
     """A ``--torch-spec`` naming a wheel on disk, or None for a requirement.
 
-    Not every torch comes from an index. A board with no stock wheel — the
-    BC-250 and its gfx1013 build, see docs/BC250.md — produces one locally, and
-    pointing ``--torch-spec`` at it has to install *that file* rather than
-    resolve its name against a package index that has never heard of it.
+    Not every torch comes from an index. A card with no published wheel needs
+    one built locally, and pointing ``--torch-spec`` at it has to install *that
+    file* rather than resolve its name against a package index that has never
+    heard of it.
 
     Deliberately narrow: only an existing path ending in ``.whl``. Anything
     else stays a requirement string, so ``torch==2.6.0`` cannot be mistaken for
@@ -337,6 +520,15 @@ def local_wheel(spec: str) -> Path | None:
 
 def step_torch(ctx: Context) -> None:
     pin = ctx.pins.torch(ctx.vendor)
+
+    # A pin delivered as wheel URLs has no index and no requirement to resolve,
+    # so the index/spec path below cannot express it. An explicit --torch-index
+    # or --torch-spec still wins: that is the escape hatch for trying something
+    # the pins do not know about.
+    if pin.from_urls and not (ctx.torch_index or ctx.torch_spec):
+        _install_torch_from_urls(ctx, pin)
+        return
+
     index = ctx.torch_index or pin.index
     spec = ctx.torch_spec or pin.spec
 
@@ -374,6 +566,40 @@ def step_torch(ctx: Context) -> None:
     ctx.state.save()
 
 
+def _install_torch_from_urls(ctx: Context, pin: pins_mod.TorchPin) -> None:
+    """Install a torch published as wheel URLs rather than through an index.
+
+    This is how AMD ships ROCm for native Windows. The runtime wheels go first
+    and in their own pip call: torch links against them, and letting pip
+    resolve one set is a smaller surface than letting it resolve both at once.
+    """
+    if pin.driver:
+        tui.info(f"  this build needs the AMD {pin.driver} graphics driver or newer")
+    if pin.docs:
+        tui.hint(f"  {pin.docs}")
+
+    if pin.prerequisites:
+        tui.info(f"installing the ROCm runtime ({len(pin.prerequisites)} packages)")
+        tui.hint(
+            "  the runtime ships as wheels of its own and must be present "
+            "before torch, which links against it."
+        )
+        ctx.pip("install", "--no-cache-dir", *pin.prerequisites)
+
+    tui.info(f"installing {pin.describe}")
+    tui.hint(
+        "  wheel URLs, not an index: download.pytorch.org publishes no ROCm "
+        "build for Windows, so there is nothing to point --index-url at. "
+        "PIP_CONSTRAINT still pins the result for every later step."
+    )
+    ctx.pip("install", "--no-cache-dir", *pin.wheels)
+
+    ctx.state.vendor = ctx.vendor
+    ctx.state.torch_index = pin.wheels[0].rsplit("/", 1)[0]
+    ctx.state.torch_spec = pin.wheels[0].rsplit("/", 1)[-1]
+    ctx.state.save()
+
+
 # --------------------------------------------------------------------------
 # Step 4: freeze the torch pin
 # --------------------------------------------------------------------------
@@ -389,19 +615,56 @@ def _installed_torch_version() -> str:
     return result.lines[-1].strip()
 
 
+#: Pinned alongside torch when present. They are not piper dependencies, but a
+#: vendor build installs the three as a tested set, and a later pip call that
+#: replaced one of them would pull a torch to match it.
+TORCH_FAMILY = ("torchvision", "torchaudio")
+
+_FAMILY_PROBE = r"""
+import json
+from importlib.metadata import PackageNotFoundError, version
+found = {}
+for name in %r:
+    try:
+        found[name] = version(name)
+    except PackageNotFoundError:
+        pass
+print(json.dumps(found))
+"""
+
+
+def _installed_family() -> dict[str, str]:
+    import json
+
+    result = env_mod.python_snippet(_FAMILY_PROBE % (TORCH_FAMILY,))
+    for line in reversed(result.lines):
+        if line.strip().startswith("{"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    return {}
+
+
 def step_constraint(ctx: Context) -> None:
     version = _installed_torch_version()
+    pins_written = {"torch": version, **_installed_family()}
+
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     TORCH_CONSTRAINT.write_text(
         "# Written by ./run setup. Passed as PIP_CONSTRAINT to every later pip\n"
         "# call so that nothing can replace the vendor-specific torch build.\n"
-        f"torch=={version}\n",
+        + "".join(f"{name}=={value}\n" for name, value in pins_written.items()),
         encoding="utf-8",
         newline="\n",
     )
     ctx.state.torch_local_version = version
     ctx.state.save()
-    tui.ok(f"pinned torch=={version} for all later pip calls")
+    tui.ok(
+        "pinned "
+        + ", ".join(f"{n}=={v}" for n, v in pins_written.items())
+        + " for all later pip calls"
+    )
 
 
 def assert_torch_unchanged(ctx: Context, after: str) -> None:
@@ -533,10 +796,17 @@ def _explain_build_failure(result: proc.Result) -> None:
             "your network or proxy settings (pip's build runs in isolation and "
             "does not inherit every proxy variable)."
         )
+    elif "microsoft visual c++" in text or "cl.exe" in text or "msvc" in text:
+        tui.error(
+            "the MSVC C++ toolchain is missing or incomplete. Install the "
+            "Visual Studio Build Tools with the C++ workload:\n"
+            f"    {VS_BUILD_TOOLS}"
+        )
     elif "no such file or directory: 'cc'" in text or "compiler" in text:
         tui.error(
-            "no working C/C++ compiler. Re-run the system_deps step, or install "
-            "base-devel (Arch) / build-essential (Debian)."
+            f"no working C/C++ compiler ({COMPILER_LABEL}). Re-run the "
+            f"system_deps step, or install base-devel (Arch) / build-essential "
+            f"(Debian)."
         )
     tui.hint("  see docs/TROUBLESHOOTING.md for the full list of build failures")
 
@@ -546,18 +816,58 @@ def _explain_build_failure(result: proc.Result) -> None:
 # --------------------------------------------------------------------------
 
 
+#: Where upstream keeps the Cython alignment kernel, relative to the checkout.
+MONOTONIC_ALIGN_DIR = Path("src/piper/train/vits/monotonic_align")
+
+
 def step_monotonic_align(ctx: Context) -> None:
-    script = PIPER_DIR / "build_monotonic_align.sh"
-    if not script.exists():
-        raise SetupError(f"missing {script} — is piper1-gpl checked out?")
-    # The script activates piper1-gpl/.venv if it exists, else uses whatever
-    # python is on PATH. Our venv lives at the repo root, so put it first.
-    path = f"{VENV_DIR / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+    """Build the VITS alignment kernel.
+
+    Upstream ships ``build_monotonic_align.sh``, which we deliberately do not
+    call: it is four commands wrapped in bash, and bash is not a thing we can
+    assume on Windows. Doing those four steps directly also removes upstream's
+    "activate piper1-gpl/.venv if it happens to exist" behaviour, which would
+    otherwise build against the wrong interpreter.
+
+    ``cythonize`` is invoked as a module rather than as the console script,
+    because the script lands in ``bin`` or ``Scripts`` depending on platform.
+    """
+    workdir = PIPER_DIR / MONOTONIC_ALIGN_DIR
+    if not (workdir / "core.pyx").is_file():
+        raise SetupError(
+            f"missing {workdir / 'core.pyx'} — is piper1-gpl checked out?"
+        )
+
+    (workdir / "monotonic_align").mkdir(exist_ok=True)
+    # cythonize skips regeneration when core.c is newer than core.pyx, which
+    # makes a retry after a failed compile a no-op. Upstream removes it too.
+    (workdir / "core.c").unlink(missing_ok=True)
+
     proc.run(
-        ["bash", str(script)],
-        env={"PATH": path, **env_mod.pip_env()},
+        [venv_python(), "-m", "Cython.Build.Cythonize", "-i", "core.pyx"],
+        cwd=workdir,
+        env=env_mod.pip_env(),
         log_path=ctx.log_path,
     )
+
+    # The extension lands beside core.pyx but has to be importable as
+    # monotonic_align.core. Suffix differs per platform (.so / .pyd) and
+    # carries the ABI tag, so match on the stem instead of naming it.
+    built = [
+        path
+        for path in workdir.iterdir()
+        if path.is_file()
+        and path.name.startswith("core.")
+        and path.suffix in (".so", ".pyd")
+    ]
+    if not built:
+        raise SetupError(
+            f"cythonize reported success but produced no extension module in "
+            f"{workdir}. Expected a core*.so or core*.pyd."
+        )
+    for path in built:
+        shutil.move(str(path), str(workdir / "monotonic_align" / path.name))
+
     result = env_mod.python_snippet(
         "from piper.train.vits.monotonic_align import maximum_path; print('ok')"
     )
@@ -567,7 +877,7 @@ def step_monotonic_align(ctx: Context) -> None:
             "start without it (it is the VITS alignment search kernel).\n"
             + "\n".join(result.lines[-10:])
         )
-    tui.ok("monotonic_align extension built")
+    tui.ok(f"monotonic_align extension built ({built[0].name})")
 
 
 # --------------------------------------------------------------------------
@@ -747,18 +1057,13 @@ def step_verify(ctx: Context) -> None:
     if info.hsa_override:
         tui.ok(
             f"HSA_OVERRIDE_GFX_VERSION={info.hsa_override} was needed and has "
-            f"been saved to .state/env.sh"
+            f"been saved to {ENV_JSON.relative_to(REPO_ROOT).as_posix()}"
         )
     if ctx.vendor != "cpu" and not info.usable_gpu:
-        from . import hardware as hardware_mod
-
         detail = info.matmul_error or info.error or "no GPU visible"
-        advice = hardware_mod.unsupported_arch_advice(
-            hardware_mod.detect(info.gcn_arch)
-        )
         ctx.warn(
             f"torch cannot use the GPU: {detail}. Training will fall back to "
-            f"CPU, which is far slower. {advice}"
+            f"CPU, which is far slower. {env_mod.unsupported_arch_advice(info)}"
         )
     elif info.usable_gpu:
         tui.ok(
@@ -774,47 +1079,29 @@ def step_verify(ctx: Context) -> None:
 def _verify_training(ctx: Context, info: env_mod.TorchInfo) -> None:
     """Prove the GPU can train, not merely multiply.
 
-    A matmul exercises rocBLAS and nothing else. The failure that matters here
-    is a missing elementwise or convolution kernel, or a fault after tens of
-    allocate/free cycles — neither of which a matmul can reach. Better to spend
-    ten seconds now than to find out an hour into a run.
+    A matmul exercises the GEMM library and nothing else. The failure that
+    matters here is a missing elementwise or convolution kernel, or a fault
+    after tens of allocate/free cycles — neither of which a matmul can reach.
+    Better to spend ten seconds now than to find out an hour into a run.
     """
-    from . import hardware as hardware_mod
-
-    hardware = hardware_mod.detect(info.gcn_arch)
-    if not hardware.is_generic:
-        tui.info("")
-        tui.info(f"hardware profile: {hardware.title}")
-        for line in hardware_mod.summarise(hardware)[1:]:
-            tui.hint(f"  {line}")
-
     tui.info("  running a real autograd loop to check training works...")
-    probe = env_mod.probe_training(
-        extra_env=env_mod.training_env(hardware_name=hardware.name)
-    )
+    probe = env_mod.probe_training(extra_env=env_mod.training_env())
     if probe.ok:
         tui.ok(f"training verified: {probe.verdict}")
         return
 
     ctx.warn(f"this GPU cannot complete a training step: {probe.verdict}")
-    if hardware.training == hardware_mod.BLOCKED:
-        tui.info("")
-        for caveat in hardware.caveats:
-            tui.warn(tui.wrap(caveat, indent="  ").lstrip())
-        if hardware.reference:
-            tui.hint(f"  source: {hardware.reference}")
-        tui.info("")
+    if info.compiled_for_device is False:
         tui.info(
-            "Everything except GPU training still works on this machine: "
-            "dataset preparation, export, and CPU training. See docs/BC250.md "
-            "for the options."
+            f"torch has no {env_mod.normalise_gfx(info.gcn_arch)} kernels "
+            f"(built for {', '.join(info.arch_list) or 'unknown'}), which is "
+            f"exactly what blocks training while leaving matmul working."
         )
-    else:
-        tui.info(
-            "The GPU does arithmetic but cannot train, which usually means the "
-            "torch build has no kernels for this architecture. Try another "
-            "index from pins.toml — see docs/GPU_SETUP.md."
-        )
+    tui.info(env_mod.unsupported_arch_advice(info))
+    tui.info(
+        "Everything else still works on this machine: dataset preparation, "
+        "export, and CPU training."
+    )
 
 
 # --------------------------------------------------------------------------

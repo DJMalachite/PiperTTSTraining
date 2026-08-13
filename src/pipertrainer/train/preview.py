@@ -95,7 +95,6 @@ def run(
     env = env_mod.training_env(
         prof.runtime.env,
         offline=offline or prof.runtime.offline,
-        hardware_name=prof.runtime.hardware,
     )
     result = _run_with_stdin(argv, payload, env, paths)
 

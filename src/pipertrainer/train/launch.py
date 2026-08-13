@@ -349,7 +349,6 @@ def print_config_gate(prepared: Prepared) -> None:
         env=env_mod.training_env(
             prepared.profile.runtime.env,
             offline=prepared.profile.runtime.offline,
-            hardware_name=prepared.profile.runtime.hardware,
         ),
         timeout=900,
     )
@@ -440,7 +439,6 @@ def start(
         prof.runtime.env,
         offline=prof.runtime.offline,
         num_workers=int(prof.data.num_workers),
-        hardware_name=prof.runtime.hardware,
     )
     run_dir = record_run(prepared, argv, env)
     log_path = run_dir / "train.log"
@@ -506,11 +504,8 @@ def _diagnose_failure(prepared: Prepared, result: proc.Result) -> None:
             "the ROCm runtime aborted. This is the signature of a GPU "
             "architecture the torch build has no kernels for."
         )
-        from .. import hardware as hardware_mod
-
-        hw = env_mod.resolved_hardware(prepared.profile.runtime.hardware)
-        tui.info("Run './run doctor' to confirm the matmul check also fails.")
-        tui.info(hardware_mod.unsupported_arch_advice(hw))
+        tui.info("Run 'doctor' to confirm the matmul check also fails.")
+        tui.info(env_mod.unsupported_arch_advice())
         return
 
     tui.error(f"training exited with code {result.returncode}")

@@ -8,23 +8,35 @@ A terminal tool that takes **one long audio recording** to a trained, exported
 [Piper](https://github.com/OHF-Voice/piper1-gpl) TTS voice. It wraps upstream
 piper1-gpl; it does not reimplement any of it.
 
-The core is **vendor-neutral**: CUDA, ROCm and CPU are all first-class. Do not
-reintroduce AMD-only assumptions into it. Hardware needing special handling gets
-an opt-in profile in `hardware.py` instead (`runtime.hardware`); `bc250` is the
-one that ships.
+The core is **vendor-neutral and platform-neutral**: CUDA, ROCm and CPU are all
+first-class, and it runs on Linux and Windows. Do not reintroduce AMD-only or
+POSIX-only assumptions into it. There is no per-board special-casing any more —
+that machinery (`hardware.py`, `runtime.hardware`, `scripts/bc250/`) existed for
+one board and has been removed. Do not reintroduce it for a single device;
+`runtime.env` in the profile is the escape hatch.
 
-**On the BC-250 specifically:** GPU training is blocked *with a stock wheel*
-because torch's kernels are compiled ahead of time per gfx target and no
-published wheel lists `gfx1013` — hence `invalid device function` on every
-elementwise op while matmul keeps working, since GEMM comes from rocBLAS.
-`scripts/bc250/build.sh` builds a torch that does carry those kernels; whether
-that is sufficient is unproven, and `./run doctor`'s autograd probe is the
-verdict. Do not write either outcome up as settled.
+**Platform facts that constrain the code:**
 
-`HSA_OVERRIDE_GFX_VERSION` is a *dead end* there, not a fix — the memory-aperture
-layout differs and it raises `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`.
-`hardware.BC250.banned_env` records this and there is a regression test; do not
-"helpfully" re-add it. See `docs/BC250.md`.
+- **ROCm has two deliveries, not one.** Linux gets an index
+  (`download.pytorch.org`); native Windows gets fixed wheel URLs from AMD's
+  `repo.radeon.com`, under `[torch.rocm.windows]` in `pins.toml`. That path is
+  **cp312-only**, needs the ROCm runtime wheels installed *before* torch, and
+  has a shorter supported-GPU list. `TorchPin.from_urls` is the discriminator;
+  `env.rocm_windows_note()` is the single place the requirements are worded.
+- Because of that, "newest supported interpreter" is the wrong rule when a pin
+  carries `requires_python` — see `install._pick_exact_python`. Getting this
+  wrong produces a bare "no matching distribution" at the torch step, which
+  names neither the cause nor the fix.
+- Venv executables live in `Scripts/*.exe` on Windows, `bin/*` elsewhere.
+  `paths.venv_bin()` is the only place that spells this; never hardcode either.
+- **`*.cmd` files must be CRLF; `run`, `setup` and `*.sh` must be LF.** Both
+  failures are opaque: cmd.exe eats the first character of every LF-terminated
+  line, and `sh` reports `bad interpreter: /bin/sh^M`. `.gitattributes` pins
+  both and `tests/test_platform.py` checks them.
+- PowerShell resolves `./run` to `run.cmd`, ignoring the extensionless POSIX
+  file, so `./run ...` in docs and help strings is correct on both platforms.
+  cmd.exe users type `run`.
+- In batch, `shift` also shifts `%0`, so capture `%~dp0` before parsing args.
 
 ## Commands
 
@@ -42,16 +54,15 @@ layout differs and it raises `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`.
 ./run smoke            # end-to-end CPU self-test on synthetic audio
 ```
 
+On Windows the same commands run through `run.cmd`; PowerShell resolves `./run`
+to it, and cmd.exe users drop the `./`.
+
 `PIPERTRAINER_ENV=<name>` selects `.venv-<name>` and `.state-<name>` instead of
-`.venv`/`.state`, so one clone can hold more than one installed environment.
-Unset — the normal case — keeps the historic layout exactly.
-
-BC-250 only, and never part of `./run setup`:
-
-```bash
-scripts/bc250/build.sh --list      # six stages: detect, kernel, container, rocblas, torch, install
-scripts/bc250/build.sh --dry-run   # print every command, change nothing
-```
+`.venv`/`.state`, so one clone can hold more than one installed environment —
+the case that matters is a checkout on a drive shared between Windows and WSL2.
+Unset — the normal case — keeps the historic layout exactly. The name is
+*refused* rather than sanitised, by `run` in shell and `paths.env_name_problem()`
+for `run.cmd`, so both always agree on the directory.
 
 Tests (stdlib `unittest`, no venv, no GPU, no audio, <1s):
 
@@ -78,19 +89,18 @@ bootstrap.
 | `profile.py` | **The schema.** One dataclass tree; every field carries a `Spec` (help/choices/bounds). The wizard renders prompts from it and the YAML writer emits the help as comments, so they cannot drift. Adding a setting means adding one field. |
 | `train/argmap.py` | **Highest-risk module.** Pure function: profile → `lightning.yaml` + equivalent argv. Owns the link-argument table, the forbidden/blocked key lists, and every pre-launch invariant. No I/O, heavily tested. |
 | `train/presets.py` | `medium`/`high`/`low` as explicit `model.*` dicts. Quality is *our* abstraction — upstream has no `--quality` flag. |
-| `env.py` | Vendor detection and torch verification: a real matmul *and* a real autograd loop (`probe_training`), plus the `HSA_OVERRIDE_GFX_VERSION` retry for targets it actually helps. |
-| `hardware.py` | Named hardware profiles (`generic`, `bc250`): environment, forced settings, banned variables, and system checks. Keeps board quirks out of the vendor logic. |
+| `env.py` | Vendor detection and torch verification: a real matmul *and* a real autograd loop (`probe_training`), plus the `HSA_OVERRIDE_GFX_VERSION` retry for targets it actually helps. Also owns `.state/env.json`, the persisted environment both entry points share. |
+| `paths.py` | Filesystem layout **and** the platform split (`WINDOWS`, `VENV_BINDIR`, `EXE_SUFFIX`, `venv_bin`). Nothing else may spell `bin` or `.exe`. |
 | `install.py` | Ordered, idempotent, resumable setup state machine. Order is load-bearing. |
 | `train/launch.py` | Preflight (dataset facts, checkpoint architecture, espeak, cache) → `--print_config` gate → run, with a reproducibility snapshot per run. |
 | `dataset/segment.py` | Groups Whisper *words* into utterances honouring min/target/max. The core dataset-quality logic. |
 | `dataset/pipeline.py` | probe → decode → macrosplit → transcribe → segment → emit → report, with per-stage caching. |
 | `tui.py` | Line-based `input()` prompts. No curses — must work over SSH, in tmux, and with piped stdin. |
-| `scripts/bc250/` | One board's build path, in POSIX sh, out of the vendor-neutral core on purpose. Six idempotent stages; the upstream kernel patches are *fetched* at pinned SHAs, never vendored. |
+| `run` / `run.cmd` | The two entry points. Both stay dumb: find an interpreter, set `PYTHONPATH`, hand off. Anything they both need belongs in Python rather than duplicated in two shell dialects — that is why `.state/env.json` replaced the old sourced `env.sh`. |
 
 `pins.toml` is the single source of truth for the piper1-gpl tag+sha, the torch
-index/version per vendor, the Whisper pin, and — under `[bc250]` — the commits of
-the third-party kernel patches that build reads. The shell scripts read it too,
-so they cannot disagree with the Python about what is being applied.
+index/version per vendor, the Whisper pin, and the interpreter search order
+(`prefer` / `prefer_windows`, as argv lists because `py -3.13` is two words).
 
 ## Non-negotiables
 
@@ -100,7 +110,10 @@ so they cannot disagree with the Python about what is being applied.
   do not.
 - **Never edit `piper1-gpl/`.** It is a pinned clone, gitignored. Workarounds for
   upstream bugs live on our side, documented in `docs/UPSTREAM_NOTES.md`.
-- **Never `sudo` without confirming**, and always print the command first.
+- **Never `sudo` without confirming**, and always print the command first. The
+  same holds for `winget`; the MSVC build tools are never installed
+  automatically, only printed, because a wrong workload selection leaves a
+  Visual Studio that looks installed and cannot compile.
 - **Nothing is dropped silently.** Every rejected clip gets a reason in
   `rejected.csv`; every refusal explains what to do instead.
 - **TUI stays stdlib-only.** PyYAML may be used *inside the venv* (it is
@@ -128,6 +141,11 @@ Read `docs/UPSTREAM_NOTES.md` before touching `train/argmap.py`. The short versi
 - **`openai-whisper` will replace a ROCm torch** — its metadata wants an unpinned
   torch plus CUDA-flavoured triton. Install `--no-deps` under `PIP_CONSTRAINT`,
   and install the vendor torch wheel *before* `piper1-gpl[train]`.
+- **`build_monotonic_align.sh` is deliberately not called.** It is four commands
+  wrapped in bash, and it activates `piper1-gpl/.venv` if that happens to exist,
+  which would build against the wrong interpreter. `install.step_monotonic_align`
+  does those four steps directly, invoking `python -m Cython.Build.Cythonize`
+  rather than the `cythonize` console script, whose location is platform-specific.
 - **`batch_size` > training split gives zero batches** (`drop_last=True`), with an
   error that names something else. Preflight refuses it.
 - **Cache ids embed the row number and transcript text**
@@ -144,15 +162,18 @@ Read `docs/UPSTREAM_NOTES.md` before touching `train/argmap.py`. The short versi
 
 ## Development environment
 
-The target is Linux; the maintainer's machine is Windows. Consequences:
+Linux and Windows are both targets, and the maintainer's machine is Windows.
+Consequences:
 
-- Write POSIX shell and Linux-path Python. LF endings (`.gitattributes` sets
-  `* text=auto`).
+- Write portable Python: `pathlib`, `os.pathsep`, `sys.platform` checks. Where a
+  shell script is unavoidable, write both halves (`*.sh` **and** `*.cmd`) and
+  respect the line-ending rule above.
 - The pure modules (`profile`, `yamlio`, `argmap`, `presets`, `segment`,
   `textnorm`, `metadata`, `report`) are testable anywhere — that is deliberate,
-  and it is where new logic should live.
-- Anything touching torch, ffmpeg, or piper **cannot be tested on Windows**. The
-  CPU smoke test on Linux is the acceptance gate.
+  and it is where new logic should live. `tests/test_platform.py` covers the
+  layout and entry-point facts without needing the other platform present.
+- Anything touching torch, ffmpeg, or piper needs a real install to test. The
+  CPU smoke test is the acceptance gate on either platform.
 - `tui.py` degrades its Unicode glyphs to ASCII when stdout cannot encode them;
   keep new output going through `tui` rather than bare `print`.
 

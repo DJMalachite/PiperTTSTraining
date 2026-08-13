@@ -95,12 +95,28 @@ class TorchPinTest(unittest.TestCase):
     def setUp(self):
         self.pins = pins_mod.load()
 
-    def test_every_vendor_has_an_index_and_spec(self):
+    def test_every_vendor_is_installable_one_way_or_the_other(self):
+        # Two delivery mechanisms, and a pin must be exactly one of them: an
+        # index that replaces PyPI, or explicit wheel URLs. AMD's native
+        # Windows ROCm build is the second kind — there is no index for it.
         for vendor in self.pins.vendors:
             with self.subTest(vendor=vendor):
                 pin = self.pins.torch(vendor)
-                self.assertTrue(pin.index.startswith("https://"))
-                self.assertTrue(pin.spec.startswith("torch=="))
+                if pin.from_urls:
+                    for url in pin.wheels:
+                        self.assertTrue(url.startswith("https://"), url)
+                    self.assertFalse(pin.index, "a URL pin has no index")
+                else:
+                    self.assertTrue(pin.index.startswith("https://"))
+                    self.assertTrue(pin.spec.startswith("torch=="))
+
+    def test_the_linux_pins_are_all_index_delivered(self):
+        # Read from the raw table so this holds when the suite runs on Windows.
+        for vendor in self.pins.vendors:
+            entry = self.pins.raw["torch"][vendor]
+            with self.subTest(vendor=vendor):
+                self.assertTrue(entry["index"].startswith("https://"))
+                self.assertTrue(entry["spec"].startswith("torch=="))
 
     def test_unknown_vendor_is_an_error(self):
         with self.assertRaises(pins_mod.PinsError):

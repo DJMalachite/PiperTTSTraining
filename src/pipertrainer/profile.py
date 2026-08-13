@@ -29,11 +29,7 @@ from typing import Any, Iterator
 from . import yamlio
 from .paths import ACTIVE_PROFILE, PROFILES_DIR, profile_path, slug
 
-SCHEMA_VERSION = 1
-
-#: Kept in sync with ``hardware.NAMES``; duplicated as a literal so that
-#: importing the schema never pulls in the hardware-probing machinery.
-HARDWARE_NAMES = ("auto", "generic", "bc250")
+SCHEMA_VERSION = 2
 
 QUALITIES = ("medium", "high", "low")
 STRATEGIES = ("align", "vad")
@@ -633,16 +629,6 @@ class RuntimeCfg:
         kind="choice",
         choices=("",) + VENDORS,
     )
-    hardware: str = spec(
-        "auto",
-        "Hardware profile. 'generic' suits every officially supported GPU. "
-        "'bc250' adds what the AMD BC-250 (gfx1013) needs: HSA_ENABLE_SDMA=0, "
-        "conservative memory settings, and checks for the kernel and amdgpu "
-        "module parameters that board requires. 'auto' picks from the detected "
-        "GPU. See docs/BC250.md.",
-        kind="choice",
-        choices=HARDWARE_NAMES,
-    )
     offline: bool = spec(
         False,
         "No network calls: no checkpoint downloads, HF_HUB_OFFLINE=1, and "
@@ -657,9 +643,8 @@ class RuntimeCfg:
     )
     env: dict[str, str] = spec_factory(
         dict,
-        "Extra environment variables for training and inference. The hardware "
-        "profile fills in what your board needs; anything you add here wins "
-        "over it.",
+        "Extra environment variables for training and inference. Anything you "
+        "put here wins over what setup inferred for this machine.",
         kind="dict",
     )
 
@@ -918,15 +903,28 @@ def validate(profile: Profile) -> list[str]:
 
 
 def migrate(data: dict[str, Any]) -> dict[str, Any]:
-    """Bring an older profile up to SCHEMA_VERSION."""
+    """Bring an older profile up to SCHEMA_VERSION.
+
+    Each bump appends a block and leaves the earlier ones in place, so a
+    profile written by any released version keeps loading.
+    """
     version = int(data.get("schema", SCHEMA_VERSION))
     if version > SCHEMA_VERSION:
         raise ProfileError(
             f"profile schema {version} is newer than this tool supports "
             f"({SCHEMA_VERSION}); update the repo"
         )
-    # No migrations yet. Each future bump appends a block here and leaves the
-    # earlier ones in place so old profiles keep working.
+
+    if version < 2:
+        # v1 carried runtime.hardware, which selected a named hardware profile.
+        # Only one board ever had one and that path is gone, so the setting has
+        # no meaning. Dropped here rather than left to the unknown-key warning:
+        # it was written by this tool, so warning about it would be blaming the
+        # user for our own schema change.
+        runtime = data.get("runtime")
+        if isinstance(runtime, dict):
+            runtime.pop("hardware", None)
+
     data["schema"] = SCHEMA_VERSION
     return data
 

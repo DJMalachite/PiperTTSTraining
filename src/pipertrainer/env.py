@@ -12,16 +12,21 @@ build has no kernels for, and the process then aborts at the first real kernel
 launch. So ``probe_torch`` runs an actual matmul and synchronises, and treats a
 probe that printed nothing as a failure rather than a success.
 
-A matmul is still not proof that the GPU can *train*. It exercises rocBLAS and
-nothing else, while the failures that stop a run are missing elementwise or
-convolution kernels (``invalid device function``) and faults after tens of
-allocate/free cycles. ``probe_training`` therefore runs a real autograd loop
-with allocation churn, using the layer types a VITS vocoder actually uses.
+A matmul is still not proof that the GPU can *train*. It exercises the GEMM
+library and nothing else, while the failures that stop a run are missing
+elementwise or convolution kernels (``invalid device function``) and faults
+after tens of allocate/free cycles. ``probe_training`` therefore runs a real
+autograd loop with allocation churn, using the layer types a VITS vocoder
+actually uses.
 
 ``HSA_OVERRIDE_GFX_VERSION`` is applied automatically only for targets it
-genuinely rescues — see ``GFX_OVERRIDES``. Boards where it is known to make
-things worse declare it in ``hardware.HardwareProfile.banned_env``, and it is
-never suggested for those.
+genuinely rescues — see ``GFX_OVERRIDES``. It is never guessed for a target
+that is merely unlisted, because presenting as the wrong ISA trades a clear
+failure for a silent one.
+
+Platform note: ROCm is Linux-only as far as PyTorch is concerned — there are no
+ROCm wheels for Windows — so ``detect_vendor`` reports CPU for an AMD card
+there and says why.
 """
 
 from __future__ import annotations
@@ -32,22 +37,18 @@ import os
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import Any, Sequence
 
 from . import pins, proc
 from .paths import (
-    ENV_SH,
+    ENV_JSON,
     REPO_ROOT,
     SETUP_STATE,
     STATE_DIR,
     TORCH_CONSTRAINT,
+    WINDOWS,
     venv_python,
 )
-
-if TYPE_CHECKING:
-    # Imported for real inside the functions that need it, matching how the
-    # rest of the package reaches for hardware profiles.
-    from .hardware import HardwareProfile
 
 VENDORS = ("rocm", "cuda", "cpu")
 
@@ -55,10 +56,10 @@ VENDORS = ("rocm", "cuda", "cpu")
 # kernels actually cover them. RDNA1 parts borrow gfx1010's, RDNA2 parts
 # gfx1030's.
 #
-# gfx1013 (BC-250, Cyan Skillfish) is deliberately ABSENT. It shares an ISA
-# with gfx1010, which makes the override tempting, but the memory-aperture
-# layout differs: anything using scratch or private addressing then raises
-# HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION. See hardware.BC250.banned_env.
+# Only targets that are known to work belong here. An override makes a device
+# claim an ISA it does not have; where the memory-aperture layout differs that
+# turns a clean "no kernels for this architecture" into a segfault deep inside
+# the runtime, so a guess is worse than a refusal.
 GFX_OVERRIDES = {
     "gfx1011": "10.1.0",
     "gfx1012": "10.1.0",
@@ -121,7 +122,7 @@ print(json.dumps(info))
 
 
 def normalise_gfx(target: str | None) -> str:
-    """``gfx1013:sramecc-:xnack-`` -> ``gfx1013``. Empty for anything unusable."""
+    """``gfx1030:sramecc-:xnack-`` -> ``gfx1030``. Empty for anything unusable."""
     if not target:
         return ""
     return target.split(":")[0].strip().lower()
@@ -135,8 +136,9 @@ def compiled_for_device(gcn_arch: str | None, arch_list: Sequence[str]) -> bool 
     elementwise or convolution kernels, and every launch raises 'invalid device
     function' — while ``torch.cuda.is_available()`` returns True and a matmul
     still succeeds, because GEMM comes from rocBLAS, a separate library with its
-    own target list. That combination is precisely the BC-250's symptom, and it
-    is why this question has to be asked independently of whether matmul worked.
+    own target list. That is why this question has to be asked independently of
+    whether the matmul worked: a card can multiply matrices all day and still
+    have no kernel for ``a + b``.
 
     ``None`` means unanswerable: no reported target (a CUDA build, or no GPU) or
     an empty arch list. Never guess here — a false 'no' would send someone off
@@ -266,33 +268,85 @@ def has_nvidia() -> bool:
     return result.ok and any(line.startswith("GPU ") for line in result.lines)
 
 
-def has_amd() -> bool:
-    """AMD GPU present and the kernel driver is loaded.
+# PCI vendor id for AMD, as sysfs and Windows both report it.
+_AMD_PCI_VENDOR = "0x1002"
 
-    Reads sysfs rather than shelling out to lspci, which needs pciutils.
+
+def has_amd() -> bool:
+    """An AMD GPU is present and its driver is loaded.
+
+    On Linux this reads sysfs rather than shelling out to lspci, which needs
+    pciutils. ``/dev/kfd`` is the compute interface: an AMD card with only the
+    graphics driver loaded cannot run ROCm and is correctly reported as absent.
     """
+    if WINDOWS:
+        return _has_amd_windows()
     if not Path("/dev/kfd").exists():
         return False
     for vendor_file in glob.glob("/sys/class/drm/card*/device/vendor"):
         try:
-            if Path(vendor_file).read_text(encoding="utf-8").strip() == "0x1002":
+            if Path(vendor_file).read_text(encoding="utf-8").strip() == _AMD_PCI_VENDOR:
                 return True
         except OSError:
             continue
     return False
 
 
+def _has_amd_windows() -> bool:
+    """AMD display adapter on Windows, via CIM.
+
+    There is no ``/dev/kfd`` to ask, and no equivalent that distinguishes "the
+    compute stack is loaded" from "a display adapter is present". So this is
+    the weaker question, and the ROCm install is proven afterwards by the same
+    matmul and autograd probes used everywhere else.
+    """
+    result = proc.capture(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-CimInstance Win32_VideoController).PNPDeviceID",
+        ],
+        timeout=30,
+    )
+    return result.ok and any("VEN_1002" in line.upper() for line in result.lines)
+
+
 def render_group_ok() -> bool | None:
-    """Whether the user can talk to /dev/kfd. ``None`` if we cannot tell.
+    """Whether the user can talk to ``/dev/kfd``. ``None`` if we cannot tell.
 
     Missing render/video membership is the most common cause of "ROCm sees no
-    GPU" on a fresh Arch install.
+    GPU" on a fresh install. Meaningless off Linux, where there is no kfd and
+    no ``geteuid``, so it answers "cannot tell" rather than guessing.
     """
+    if not hasattr(os, "geteuid"):
+        return None
     result = proc.capture(["id", "-nG"], timeout=10)
     if not result.ok or not result.lines:
         return None
     groups = set(result.lines[0].split())
     return bool(groups & {"render", "video"}) or os.geteuid() == 0
+
+
+def rocm_windows_note() -> str:
+    """What ROCm on native Windows additionally requires, from the pins.
+
+    Kept in one place and read from ``pins.toml`` so the driver version and the
+    documentation link cannot drift out of step with the wheels we install.
+    """
+    pin = pins.load().torch("rocm")
+    if not pin.from_urls:
+        return ""
+    parts = ["ROCm on native Windows"]
+    if pin.requires_python:
+        parts.append(f"needs Python {pin.requires_python} exactly (cp312 wheels)")
+    if pin.driver:
+        parts.append(f"and the AMD {pin.driver} graphics driver or newer")
+    text = " ".join(parts) + "."
+    if pin.docs:
+        text += f" Supported GPUs are listed at {pin.docs}"
+    return text
 
 
 def detect_vendor() -> tuple[str, list[str]]:
@@ -305,13 +359,17 @@ def detect_vendor() -> tuple[str, list[str]]:
     if nvidia:
         return "cuda", notes
     if amd:
-        if render_group_ok() is False:
+        if WINDOWS:
+            note = rocm_windows_note()
+            if note:
+                notes.append(note)
+        elif render_group_ok() is False:
             notes.append(
                 "you are not in the 'render' or 'video' group — ROCm will not "
                 "see the GPU until you are (log out and back in after adding)"
             )
         return "rocm", notes
-    if Path("/dev/kfd").exists():
+    if not WINDOWS and Path("/dev/kfd").exists():
         notes.append("/dev/kfd exists but no AMD PCI device was found")
     notes.append("no supported GPU detected; falling back to CPU")
     return "cpu", notes
@@ -417,16 +475,7 @@ def needs_gfx_override(info: TorchInfo) -> str | None:
     """Suggested HSA_OVERRIDE_GFX_VERSION, or None if it would not help."""
     if not info.hip or not info.available:
         return None
-    from . import hardware
-
     arch = (info.gcn_arch or "").split(":")[0]
-
-    # Some boards are known to be made *worse* by an override. Never suggest
-    # one for those, however tempting the ISA similarity looks.
-    profile = hardware.detect(arch)
-    if "HSA_OVERRIDE_GFX_VERSION" in profile.banned_env:
-        return None
-
     if arch in GFX_OVERRIDES:
         return GFX_OVERRIDES[arch]
     if arch and info.arch_list and arch not in [
@@ -446,10 +495,10 @@ def verify_torch(python: Path | None = None) -> TorchInfo:
 
     override = needs_gfx_override(info)
     if override is None and info.aborted and SetupState.load().vendor == "rocm":
-        # The probe died before it could report gcnArchName, so we cannot ask
-        # the hardware profile whether an override is appropriate. Try gfx1030
-        # blind — it is the single most likely rescue on an unlisted RDNA2 part
-        # — but never persist it unless the retry genuinely succeeds.
+        # The probe died before it could report gcnArchName, so there is no
+        # target to look up. Try gfx1030 blind — it is the single most likely
+        # rescue on an unlisted RDNA2 part — but never persist it unless the
+        # retry genuinely succeeds.
         override = "10.3.0"
     if override is None:
         return info
@@ -609,7 +658,7 @@ def record_torch(state: SetupState, info: TorchInfo) -> SetupState:
         state.torch_local_version = info.torch_version
     state.save()
     if info.hsa_override:
-        write_env_sh({"HSA_OVERRIDE_GFX_VERSION": info.hsa_override})
+        write_persisted_env({"HSA_OVERRIDE_GFX_VERSION": info.hsa_override})
     return state
 
 
@@ -618,22 +667,51 @@ def record_torch(state: SetupState, info: TorchInfo) -> SetupState:
 # --------------------------------------------------------------------------
 
 
-def write_env_sh(values: dict[str, str]) -> None:
-    """Persist env vars that ``./run`` sources on every invocation."""
+def read_persisted_env() -> dict[str, str]:
+    """Environment discovered by setup and stored in ``.state/env.json``.
+
+    JSON rather than the shell fragment this used to be: the POSIX ``./run``
+    could source that, but ``run.cmd`` cannot, and having two writers of the
+    same facts in two syntaxes is how they drift. Applied by ``__main__`` at
+    startup instead, which works identically everywhere.
+    """
+    if not ENV_JSON.exists():
+        return {}
+    try:
+        data = json.loads(ENV_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if not str(k).startswith("_")}
+
+
+def write_persisted_env(values: dict[str, str]) -> None:
+    """Merge ``values`` into the persisted environment."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    existing: dict[str, str] = {}
-    if ENV_SH.exists():
-        for line in ENV_SH.read_text(encoding="utf-8").splitlines():
-            if line.startswith("export "):
-                key, _, value = line[len("export ") :].partition("=")
-                existing[key.strip()] = value.strip().strip('"')
+    existing = read_persisted_env()
     existing.update(values)
-    body = [
-        "# Written by ./run setup. Sourced by ./run on every invocation.",
-        "# Delete this file to forget the detected settings.",
-    ]
-    body += [f'export {key}="{value}"' for key, value in sorted(existing.items())]
-    ENV_SH.write_text("\n".join(body) + "\n", encoding="utf-8", newline="\n")
+    payload = {
+        "_comment": (
+            "Written by 'run setup'. Applied to every invocation. Delete this "
+            "file to forget the detected settings."
+        ),
+        **{key: existing[key] for key in sorted(existing)},
+    }
+    ENV_JSON.write_text(
+        json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
+
+
+def apply_persisted_env() -> None:
+    """Put the persisted environment into ``os.environ`` without clobbering.
+
+    A variable already set in the shell wins: the file records what setup
+    *discovered*, and an explicit override on the command line is the user
+    telling us they know better.
+    """
+    for key, value in read_persisted_env().items():
+        os.environ.setdefault(key, value)
 
 
 def torch_constraint_file() -> Path | None:
@@ -654,15 +732,30 @@ def pip_env() -> dict[str, str]:
     return env
 
 
-def resolved_hardware(hardware_name: str = "auto") -> HardwareProfile:
-    """The hardware profile in force: configuration plus the recorded target.
+GENERIC_ARCH_ADVICE = (
+    "See docs/GPU_SETUP.md, and try a different ROCm index from pins.toml: "
+    "'./run setup --force-step torch --torch-index "
+    "https://download.pytorch.org/whl/rocm6.3 --torch-spec torch==2.6.0'."
+)
 
-    Reads the gfx target from setup state rather than probing, so this is cheap
-    enough to call from an error path.
+
+def unsupported_arch_advice(info: "TorchInfo | None" = None) -> str:
+    """What to actually try when torch ships no kernels for this device.
+
+    On Linux, swapping ROCm wheels is the right first move: torch's arch list
+    differs between ROCm releases, and a card missing from one build is often
+    present in another. On Windows there is exactly one published ROCm build,
+    so there is nothing to swap to and the real questions are the driver
+    version and whether the card is on AMD's supported list.
     """
-    from . import hardware as hardware_mod
-
-    return hardware_mod.resolve(hardware_name, SetupState.load().info.gcn_arch)
+    if WINDOWS:
+        note = rocm_windows_note()
+        return (
+            "There is one published ROCm build for native Windows, so there is "
+            "no alternative index to try. Check the driver version and the "
+            "supported-GPU list, then consider CPU training or WSL2. " + note
+        ).strip()
+    return GENERIC_ARCH_ADVICE
 
 
 def training_env(
@@ -670,23 +763,19 @@ def training_env(
     *,
     offline: bool = False,
     num_workers: int | None = None,
-    hardware_name: str = "auto",
 ) -> dict[str, str]:
     """Environment for a training/inference subprocess.
 
-    Layered, most general first: inferred defaults, then the hardware profile,
-    then whatever the user put in ``runtime.env``. The user always wins — but a
-    setting the hardware profile bans is never *inferred*, only ever set
-    deliberately.
+    Layered, most general first: inferred defaults, then whatever the user put
+    in ``runtime.env``. The user always wins.
     """
     state = SetupState.load()
-    profile = resolved_hardware(hardware_name)
     env: dict[str, str] = {}
 
     # lightning.yaml can name a class_path inside this package (the checkpoint
-    # policy in train/callbacks.py). ./run already exports this, but making it
-    # explicit means the recorded command reproduces by hand and --print_config
-    # can resolve the class the same way the real run does.
+    # policy in train/callbacks.py). The entry point already exports this, but
+    # making it explicit means the recorded command reproduces by hand and
+    # --print_config resolves the class the same way the real run does.
     src = str(REPO_ROOT / "src")
     inherited = os.environ.get("PYTHONPATH", "")
     parts = [p for p in inherited.split(os.pathsep) if p]
@@ -694,17 +783,13 @@ def training_env(
         parts.insert(0, src)
     env["PYTHONPATH"] = os.pathsep.join(parts)
 
-    if state.hsa_override and "HSA_OVERRIDE_GFX_VERSION" not in profile.banned_env:
+    if state.hsa_override:
         env["HSA_OVERRIDE_GFX_VERSION"] = state.hsa_override
 
-    if state.info.hip and profile.is_generic:
-        # Biggest single anti-fragmentation win on a shared-memory APU, where
-        # the GPU and the desktop compete for the same physical RAM. Left to
-        # hardware profiles otherwise: on a board whose failure mode is
-        # allocation churn, remapping virtual segments is not obviously safe.
+    if state.info.hip:
+        # The biggest single anti-fragmentation win on a shared-memory APU,
+        # where the GPU and the desktop compete for the same physical RAM.
         env.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
-
-    env.update(profile.env)
 
     if offline:
         env["HF_HUB_OFFLINE"] = "1"
@@ -754,5 +839,6 @@ def low_vram(info: TorchInfo) -> bool:
     return info.usable_gpu and info.total_memory_gib <= 16.0
 
 
-def python_candidates() -> list[str]:
+def python_candidates() -> list[list[str]]:
+    """Interpreter argvs to probe during setup, best first."""
     return pins.load().python_prefer

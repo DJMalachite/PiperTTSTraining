@@ -15,9 +15,9 @@ import platform
 import shutil
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 from . import env as env_mod
+from . import install
 from . import pins as pins_mod
 from . import proc, profile as profile_mod, tui
 from .paths import (
@@ -25,8 +25,8 @@ from .paths import (
     REPO_ROOT,
     TORCH_CONSTRAINT,
     VENV_DIR,
+    WINDOWS,
     in_venv,
-    venv_python,
 )
 
 OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
@@ -162,18 +162,19 @@ def _espeak_voice_check(report: Report, voice: str) -> None:
 
 
 def run(offline: bool = False) -> int:
-    from . import hardware as hardware_mod
-
     report = Report()
     pins = pins_mod.load()
     state = env_mod.SetupState.load()
 
+    supported = sys.platform.startswith(install.SUPPORTED_PLATFORMS)
     tui.heading("Machine")
     report.add(
-        OK if sys.platform.startswith("linux") else FAIL,
+        OK if supported else FAIL,
         "platform",
         platform.platform(),
-        "" if sys.platform.startswith("linux") else "this tool targets Linux; use WSL2 on Windows",
+        ""
+        if supported
+        else "this tool is developed against Linux and Windows",
     )
     report.add(
         OK if sys.version_info[:2] >= tuple(pins.python_min[:2]) else FAIL,
@@ -195,7 +196,6 @@ def run(offline: bool = False) -> int:
         ("git", "cloning piper1-gpl", True),
         ("ffmpeg", "decoding and cutting audio", True),
         ("ffprobe", "reading audio metadata", True),
-        ("bash", "piper's build_monotonic_align.sh", True),
         ("cmake", "building espeak-ng (pip can supply a wheel)", False),
         ("ninja", "building espeak-ng (pip can supply a wheel)", False),
     ):
@@ -207,14 +207,20 @@ def run(offline: bool = False) -> int:
                 FAIL if fatal else WARN,
                 tool,
                 "not found",
-                f"needed for {why}; install it with your package manager",
+                f"needed for {why}; " + (
+                    "install it with winget — see './run setup'"
+                    if WINDOWS
+                    else "install it with your package manager"
+                ),
             )
-    compiler = next((c for c in ("cc", "gcc", "clang") if shutil.which(c)), None)
+    compiler = install.find_compiler()
     report.add(
         OK if compiler else FAIL,
         "c compiler",
         compiler or "none found",
-        "install base-devel (Arch) or build-essential (Debian)",
+        install.VS_BUILD_TOOLS
+        if WINDOWS
+        else "install base-devel (Arch) or build-essential (Debian)",
     )
 
     tui.heading("Installation")
@@ -335,17 +341,14 @@ def run(offline: bool = False) -> int:
                 f"built for {env_mod.normalise_gfx(info.gcn_arch)}",
             )
         elif compiled is False:
-            hw = hardware_mod.resolve(_configured_hardware(), info.gcn_arch)
             report.add(
-                # Expected on a board documented as blocked; a genuine surprise
-                # anywhere else.
-                WARN if hw.training == hardware_mod.BLOCKED else FAIL,
+                FAIL,
                 "torch gfx kernels",
                 f"this torch has no {env_mod.normalise_gfx(info.gcn_arch)} "
                 f"code (built for {', '.join(info.arch_list)})",
                 "Every kernel launch outside rocBLAS raises 'invalid device "
                 "function', which is what blocks training while leaving matmul "
-                "working. " + hardware_mod.unsupported_arch_advice(hw),
+                "working. " + env_mod.unsupported_arch_advice(info),
             )
 
         if state.vendor != "cpu" and not info.available:
@@ -363,9 +366,7 @@ def run(offline: bool = False) -> int:
                 "torch.cuda.is_available() lies on unsupported ROCm targets. "
                 f"Device reports {info.gcn_arch or 'unknown'}; torch was built "
                 f"for {', '.join(info.arch_list) or 'unknown'}. "
-                + hardware_mod.unsupported_arch_advice(
-                    hardware_mod.resolve(_configured_hardware(), info.gcn_arch)
-                ),
+                + env_mod.unsupported_arch_advice(info),
             )
         elif info.available:
             report.add(
@@ -386,7 +387,7 @@ def run(offline: bool = False) -> int:
                     f"ladder in docs/TROUBLESHOOTING.md",
                 )
 
-    _hardware_section(report, info, state)
+    _training_probe(report, info)
 
     tui.heading("Profiles")
     names = profile_mod.profile_names()
@@ -422,101 +423,33 @@ def run(offline: bool = False) -> int:
     return _finish(report)
 
 
-def _torch_lib_dirs() -> list[Path]:
-    """Where an installed torch keeps its bundled libraries."""
-    result = env_mod.python_snippet(
-        "import os, torch; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))"
-    )
-    if not result.ok or not result.lines:
-        return []
-    return [Path(result.lines[-1].strip())]
+def _training_probe(report: Report, info: env_mod.TorchInfo) -> None:
+    """The measurement that actually predicts whether a run will survive.
 
-
-def _configured_hardware() -> str:
-    """``runtime.hardware`` from the active profile, or 'auto'."""
-    active = profile_mod.get_active()
-    if active:
-        try:
-            prof, _ = profile_mod.load_by_name(active)
-            return prof.runtime.hardware
-        except profile_mod.ProfileError:
-            pass
-    return "auto"
-
-
-def _hardware_section(report: Report, info: env_mod.TorchInfo, state) -> None:
-    """Hardware-specific checks, and the one that actually predicts training."""
-    from . import hardware as hardware_mod
-
-    configured = _configured_hardware()
-    hw = hardware_mod.resolve(configured, info.gcn_arch)
-    tui.heading(f"Hardware profile: {hw.name}")
-    tui.info(f"  {hw.title}")
-    for line in hardware_mod.summarise(hw)[1:]:
-        tui.hint(f"  {line}")
-
-    for check in hardware_mod.checks_for(hw, _torch_lib_dirs()):
-        status = {
-            hardware_mod.OK: OK,
-            hardware_mod.WARN: WARN,
-            hardware_mod.FAIL: FAIL,
-            hardware_mod.INFO: SKIP,
-        }[check.status]
-        report.add(status, check.name, check.detail, check.fix)
-
-    if hw.caveats:
-        tui.info("")
-        for caveat in hw.caveats:
-            tui.warn(tui.wrap(caveat, indent="  ").lstrip())
-        if hw.reference:
-            tui.hint(f"  source: {hw.reference}")
-
-    # The measurement that matters. A matmul proves arithmetic; only an
-    # autograd loop with allocation churn proves training.
+    A matmul proves arithmetic. Only an autograd loop with allocation churn
+    proves training, because the failures that stop a run — a missing
+    elementwise or convolution kernel, a fault after tens of allocate/free
+    cycles — cannot be reached by a matmul.
+    """
+    tui.heading("Training")
     if not info.usable_gpu:
         report.add(SKIP, "training probe", "no usable GPU to test")
         return
 
-    tui.info("")
     tui.info("  running a real autograd loop (this takes a few seconds)...")
-    probe = env_mod.probe_training(
-        extra_env=env_mod.training_env(hardware_name=configured)
-    )
+    probe = env_mod.probe_training(extra_env=env_mod.training_env())
     if probe.ok:
-        report.add(
-            OK, "training probe", probe.verdict
-        )
-    else:
-        # A blocked board is only *expected* to fail while torch has no kernels
-        # for it. Once it does — a from-source build, see docs/BC250.md — a
-        # failure stops being a confirmation and becomes a real result worth
-        # failing on, because the documented cause has been removed.
-        expected = (
-            hw.training == hardware_mod.BLOCKED
-            and info.compiled_for_device is not True
-        )
-        if expected:
-            fix = (
-                "This matches what is documented for this board, so it is a "
-                "confirmation rather than a surprise. Either build a torch "
-                f"that has kernels for it ({hw.build_script}), or train on CPU "
-                "or another machine and use this one for dataset preparation. "
-                f"See {hw.doc or 'docs/GPU_SETUP.md'} and {hw.reference}."
-            )
-        elif hw.training == hardware_mod.BLOCKED:
-            fix = (
-                "torch does carry kernels for this device, so the usual cause "
-                "is ruled out and this failure is new information. Capture the "
-                f"error above and report it to {hw.reference} — nobody has "
-                f"published a result either way. See {hw.doc}."
-            )
-        else:
-            fix = (
-                "The GPU can do arithmetic but cannot complete a training "
-                "step. Usually this means the torch build has no kernels for "
-                "this architecture. See docs/GPU_SETUP.md."
-            )
-        report.add(WARN if expected else FAIL, "training probe", probe.verdict, fix)
+        report.add(OK, "training probe", probe.verdict)
+        return
+
+    report.add(
+        FAIL,
+        "training probe",
+        probe.verdict,
+        "The GPU can do arithmetic but cannot complete a training step. "
+        "Usually this means the torch build has no kernels for this "
+        "architecture. " + env_mod.unsupported_arch_advice(info),
+    )
 
 
 def _import_fix(name: str) -> str:

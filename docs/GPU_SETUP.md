@@ -63,9 +63,10 @@ Run it any time:
 
 ## Verification is a real training step, not just a matmul
 
-A matmul exercises rocBLAS and nothing else. The failure that actually stops a
-run is a missing elementwise or convolution kernel — `invalid device function` —
-or a fault after tens of allocate/free cycles. Neither is reachable by a matmul.
+A matmul exercises the GEMM library and nothing else. The failure that actually
+stops a run is a missing elementwise or convolution kernel — `invalid device
+function` — or a fault after tens of allocate/free cycles. Neither is reachable
+by a matmul.
 
 So `./run setup` and `./run doctor` also run a **real autograd loop**: a small
 model built from the layer types a VITS vocoder uses (`Conv1d`,
@@ -73,39 +74,74 @@ model built from the layer types a VITS vocoder uses (`Conv1d`,
 allocating fresh tensors every iteration. Ten seconds now beats an hour into a
 run.
 
-## The BC-250 (gfx1013) — see docs/BC250.md
+## AMD on Windows
 
-The BC-250 needs enough special handling that it has [its own
-document](BC250.md). The short version:
+ROCm runs natively on Windows, but it is delivered differently from Linux and
+the differences are load-bearing.
 
-- **`HSA_OVERRIDE_GFX_VERSION` is a dead end on this board**, despite being the
-  most common advice. gfx1010 and gfx1013 share an ISA, but the memory-aperture
-  layout differs, so anything touching scratch or private addressing raises
-  `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`. The tool refuses to set it.
-- Compute needs kernel 7.1.5+, a patched amdgpu module with
-  `amdgpu.bc250_cc_write_mode=3` and `amdgpu.bc250_flush_by_runlist=1`,
-  `HSA_ENABLE_SDMA=0`, and `amdgpu.sched_policy` left at its default.
-- **Full training is blocked with a stock wheel**, because torch's kernels are
-  compiled ahead of time per gfx target and no published wheel lists gfx1013.
-  Dataset preparation, export and CPU training all work regardless.
-- `scripts/bc250/build.sh` builds a torch that does carry gfx1013 kernels, in
-  six resumable stages. Whether that is enough is unproven; the autograd probe
-  in `./run doctor` is the verdict.
+On Linux, ROCm torch comes from `download.pytorch.org` like any other wheel, and
+several ROCm versions are available to try. On Windows, AMD publishes one build
+at fixed URLs on `repo.radeon.com`. `./run setup` installs it automatically when
+it detects an AMD GPU; the pins live under `[torch.rocm.windows]` in
+`pins.toml`. Three requirements come with it:
 
-Set `runtime.hardware: bc250` (or leave it at `auto`) to get the environment,
-the conservative settings, and the extra checks.
+- **Python 3.12, exactly.** The wheels are cp312 and there is no other build.
+  Setup looks for 3.12 specifically on this path instead of taking the newest
+  interpreter, and if it cannot find one it says so and tells you how to get it
+  — rather than building a 3.13 venv that fails later with a bare "no matching
+  distribution".
+- **A recent AMD graphics driver** (the version is recorded in `pins.toml`).
+  This cannot be checked from here, so it is reported rather than enforced.
+- **A supported GPU.** The Windows list is shorter than the Linux one. Rather
+  than reproduce a list that will go stale, setup installs and then *proves* the
+  device with the same real matmul and real autograd loop it uses everywhere
+  else — see below.
+
+The ROCm runtime itself ships as four more wheels, installed before torch
+because torch links against them. Setup does that in its own step.
+
+If your card turns out not to be supported, the fallbacks are CPU training
+(everything except the training step runs at full speed) or WSL2, where the
+Linux ROCm wheels apply. If you share one checkout between Windows and WSL2, use
+`PIPERTRAINER_ENV` to give each its own venv — they cannot occupy the same
+`.venv`.
+
+**Upstream instructions:**
+<https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html>
+
+## The torch build has no kernels for your card
+
+This is the failure worth understanding, because everything reports healthy
+right up until training starts.
+
+torch's GPU kernels are compiled ahead of time, once per target in
+`torch.cuda.get_arch_list()`. A device missing from that list has no elementwise
+or convolution kernels, so every launch raises `invalid device function` — while
+`torch.cuda.is_available()` returns True *and a matmul still succeeds*, because
+GEMM comes from rocBLAS, a separate library with its own target list.
+
+`./run doctor` asks this question independently of the matmul and reports it as
+`torch gfx kernels`. If it fails, a different ROCm build is the first thing to
+try — see below.
 
 ## Overrides for boards where they do work
 
 `HSA_OVERRIDE_GFX_VERSION` genuinely rescues several unsupported targets, and the
 probe applies it automatically for those: gfx1011 and gfx1012 present as gfx1010
 (`10.1.0`), and gfx1031 through gfx1036 present as gfx1030 (`10.3.0`). When the
-retry succeeds it is persisted to `.state/env.sh` (sourced by `./run`) and
-recorded in the profile's `runtime.env`.
+retry succeeds it is persisted to `.state/env.json` (applied on every
+invocation, on both platforms) and recorded in the profile's `runtime.env`.
+
+An override is only ever applied for a target known to be rescued by it. It is
+never guessed for a merely-unlisted device: an override makes the card claim an
+ISA it does not have, and where that is wrong it turns a legible "no kernels for
+this architecture" into a fault deep inside the runtime.
 
 If no override helps, the CPU path stays fully functional and the next thing to
-try is a different ROCm build. ROCm 7.x has been progressively dropping gfx10
-targets, which is exactly why the default is 6.4 rather than the newest:
+try is a different ROCm build. This applies on Linux; the native-Windows build
+is a single published set, so there is nothing to swap to there. ROCm 7.x has
+been progressively dropping gfx10 targets, which is exactly why the Linux
+default is 6.4 rather than the newest:
 
 ```bash
 ./run setup --force-step torch --force-step constraint --torch-index https://download.pytorch.org/whl/rocm6.3 --torch-spec torch==2.6.0
@@ -116,8 +152,8 @@ lists the alternatives under `[torch.rocm]`.
 
 ## Being in the right groups
 
-The single most common cause of "ROCm sees no GPU" on a fresh Arch install is not
-being able to open `/dev/kfd`:
+Linux only. The single most common cause of "ROCm sees no GPU" on a fresh Arch
+install is not being able to open `/dev/kfd`:
 
 ```bash
 sudo usermod -aG render,video "$USER"
@@ -142,7 +178,7 @@ they end up in the run log alongside everything else:
 
 ## Memory on an APU
 
-A board like the BC-250 has no discrete VRAM: the GPU and the rest of the system
+An integrated GPU or APU has no discrete VRAM: it and the rest of the system
 share the same physical memory, and so does your desktop compositor. Two
 consequences:
 

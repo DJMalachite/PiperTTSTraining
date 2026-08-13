@@ -17,7 +17,13 @@ espeak_ng_tag = "724808c"
 min = "3.11"
 # Probed in this order; first hit wins. 3.14+ is allowed but warned about
 # (numba/llvmlite, which openai-whisper needs, tends to lag new CPython).
-prefer = ["python3.13", "python3.12", "python3.11", "python3"]
+#
+# Each entry is an argv, not a bare command name, because the two platforms
+# disagree about how you ask for a specific interpreter. Unix puts versioned
+# names on PATH; Windows ships one `python.exe` plus the `py` launcher, which
+# takes the version as an argument.
+prefer = [["python3.13"], ["python3.12"], ["python3.11"], ["python3"]]
+prefer_windows = [["py", "-3.13"], ["py", "-3.12"], ["py", "-3.11"], ["python"]]
 
 [build]
 # Build requirements for piper1-gpl's own setup.py, installed into our venv.
@@ -72,6 +78,40 @@ alternatives = [
   { index = "https://download.pytorch.org/whl/rocm6.3", spec = "torch==2.6.0" },
 ]
 
+# ROCm on *native* Windows. A different delivery mechanism, not a different
+# index: AMD publishes these wheels at fixed URLs on repo.radeon.com, and
+# download.pytorch.org has no ROCm wheels for Windows at all. Three constraints
+# come with it, all of them hard:
+#
+#   * Python 3.12 exactly. The wheels are cp312 and there is no other build,
+#     which is why [python].prefer_windows cannot simply lead with 3.13.
+#   * The ROCm runtime itself ships as four more wheels that must be installed
+#     *before* torch.
+#   * A recent AMD graphics driver. We cannot check the version from here, so
+#     it is reported rather than enforced.
+#
+# Supported GPUs are a shorter list than on Linux; rather than copy a list that
+# will go stale, setup installs and then proves the device with the same real
+# matmul and real autograd loop it uses everywhere else.
+[torch.rocm.windows]
+requires_python = "3.12"
+driver = "26.2.2"
+docs = "https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html"
+prerequisites = [
+  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl",
+  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",
+  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl",
+  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm-7.2.1.tar.gz",
+]
+# torchvision and torchaudio are not used by piper, but they are part of the
+# configuration AMD tests and publishes as a set. Installing the set is cheaper
+# than discovering which mismatch matters.
+wheels = [
+  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+  "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+]
+
 [torch.cuda]
 index = "https://download.pytorch.org/whl/cu128"
 spec = "torch==2.9.1"
@@ -83,43 +123,6 @@ alternatives = [
 index = "https://download.pytorch.org/whl/cpu"
 spec = "torch==2.9.1"
 alternatives = []
-
-[bc250]
-# Inputs to scripts/bc250/build.sh, which builds a gfx1013 ROCm stack for the
-# AMD BC-250. Nothing here is touched by an ordinary './run setup' — see
-# docs/BC250.md before any of it makes sense.
-#
-# The kernel-side fixes come from two separate projects and are *fetched* at
-# these SHAs rather than vendored, so attribution stays where it belongs and
-# there is no copy here to drift out of date.
-reference_repo = "https://github.com/akandr/bc250-rocm"
-reference_sha = "1b7418e221259ed0631391481a958578d81a5f55"
-cu_unlock_repo = "https://github.com/duggasco/bc250-40cu-unlock"
-cu_unlock_sha = "ae7c30c78e253a5e2c6af0e9c090f807b825191c"
-
-# The build container. Fedora 43 is not incidental: it is the distribution the
-# reference work was done on and it packages ROCm 6.4 in its own repositories,
-# which is what lets build_rocblas_gfx1013.sh run against a system ROCm the way
-# its author intended. Changing this means adapting that script.
-container_image = "registry.fedoraproject.org/fedora-toolbox:43"
-container_name = "bc250"
-# Not Fedora 43's default python3.14: numba, which openai-whisper needs, lags
-# new CPython releases. Matches the head of [python].prefer.
-container_python = "python3.13"
-
-# torch, built from source with PYTORCH_ROCM_ARCH=gfx1013. The version matches
-# [torch.rocm] deliberately: keeping it identical means PIP_CONSTRAINT, the
-# constraint file and every existing version check stay coherent whether the
-# wheel came from download.pytorch.org or from this build.
-torch_repo = "https://github.com/pytorch/pytorch"
-torch_tag = "v2.9.1"
-# Appended as a local version, so the wheel is self-describing and the
-# constraint file records what it actually is: 2.9.1+rocm6.4.gfx1013.
-torch_local_version = "rocm6.4.gfx1013"
-
-gfx_target = "gfx1013"
-# Kernel source, rocBLAS, Tensile, a full pytorch tree and its build artefacts.
-build_free_gib = 60
 
 [checkpoints]
 # HuggingFace dataset holding pretrained Piper checkpoints for fine-tuning.

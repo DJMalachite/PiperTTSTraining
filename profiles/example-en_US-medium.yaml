@@ -4,7 +4,7 @@
 # Every setting maps to a piper1-gpl flag; see docs/TRAINING.md for the table.
 # Settings under `runtime` describe this machine and are not portable.
 
-schema: 1
+schema: 2
 
 # Identity of the voice being trained.
 voice:
@@ -336,13 +336,6 @@ runtime:
   # torch. (one of: , rocm, cuda, cpu)
   vendor: ""
 
-  # Hardware profile. 'generic' suits every officially supported GPU. 'bc250'
-  # adds what the AMD BC-250 (gfx1013) needs: HSA_ENABLE_SDMA=0, conservative
-  # memory settings, and checks for the kernel and amdgpu module parameters
-  # that board requires. 'auto' picks from the detected GPU. See
-  # docs/BC250.md. (one of: auto, generic, bc250)
-  hardware: auto
-
   # No network calls: no checkpoint downloads, HF_HUB_OFFLINE=1, and
   # mos_metric forced to 'none' to skip a torch.hub timeout.
   offline: false
@@ -351,9 +344,8 @@ runtime:
   # automatically when a detected GPU has 16 GB or less.
   low_vram: false
 
-  # Extra environment variables for training and inference. The hardware
-  # profile fills in what your board needs; anything you add here wins over
-  # it.
+  # Extra environment variables for training and inference. Anything you put
+  # here wins over what setup inferred for this machine.
   env: {}
 
 # ONNX export and the inference defaults baked into the config.

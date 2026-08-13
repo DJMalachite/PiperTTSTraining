@@ -144,8 +144,8 @@ returned metrics: ['loss_g', ..., 'val_disc', 'epoch', 'step']
 
 The two upstream defaults are consistent with each other, so this never fires
 for a default online run whose hub fetch succeeds. It fires for anyone who sets
-`mos_metric: none` — which includes every offline run and the `bc250` example
-profile — **and equally for an online run whose fetch fails**, because
+`mos_metric: none` — which includes every offline run — **and equally for an
+online run whose fetch fails**, because
 `MosPredictor.score()` returns `None` once `_disabled` is set, leaving
 `mos_scores` empty and `val_mos` unlogged. The graceful degradation in `mos.py`
 protects the metric, not the run.
@@ -356,15 +356,35 @@ text.
 **We do:** `train/preview.py` sends `{"text": ...}` per line and prints the
 index-to-sentence mapping, since `0.wav` is otherwise meaningless.
 
-## 16. `build_monotonic_align.sh` prefers its own venv
+## 16. `build_monotonic_align.sh` prefers its own venv, and is bash
 
 The script activates `piper1-gpl/.venv` **if it exists**, otherwise uses whatever
 `python` is on `PATH`. It needs `cythonize`, which comes from the `[train]`
-extra, and it emits into a nested `monotonic_align/monotonic_align/`.
+extra, and it emits into a nested `monotonic_align/monotonic_align/`. In full it
+is four commands:
 
-**We do:** invoke it with our venv's `bin` prepended to `PATH`, then verify with
-`from piper.train.vits.monotonic_align import maximum_path` — a successful script
-exit is not proof the extension is importable.
+```sh
+cd src/piper/train/vits/monotonic_align
+mkdir -p monotonic_align
+rm -f core.c
+cythonize -i core.pyx
+mv core*.so monotonic_align/
+```
+
+Two problems, not one. The venv preference would build against the wrong
+interpreter whenever a stray `piper1-gpl/.venv` exists — ours lives at the repo
+root. And it is bash, which is not available on Windows.
+
+**We do:** not call it. `install.step_monotonic_align` performs those four steps
+directly with our venv interpreter, invoking `python -m Cython.Build.Cythonize`
+rather than the `cythonize` console script (which lands in `bin` or `Scripts`
+depending on platform), and matching the built extension by stem so `.so` and
+`.pyd` are both handled. Then it verifies with
+`from piper.train.vits.monotonic_align import maximum_path` — a successful exit
+is not proof the extension is importable.
+
+Re-check this section when bumping the `[piper]` pin: it is the one place we
+reimplement an upstream build step rather than calling it.
 
 ## 17. Dependency pins live in `setup.py`, not `pyproject.toml`
 

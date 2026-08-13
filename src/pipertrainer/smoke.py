@@ -424,7 +424,6 @@ def _gradient_clip_check(results: Results, prepared) -> None:
         env=env_mod.training_env(
             prepared.profile.runtime.env,
             offline=True,
-            hardware_name=prepared.profile.runtime.hardware,
         ),
         timeout=1800,
     )
